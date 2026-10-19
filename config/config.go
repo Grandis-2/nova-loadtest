@@ -285,14 +285,16 @@ func (c *Config) Validate() error {
 		bad("runner 값을 확인한다(entry_graceful_stop은 1초 이상, max_open_at_lead는 0보다 커야 한다)")
 	}
 	m := c.Members
-	if m.Start <= 0 || m.Count <= 0 || m.Start+m.Count > 1_000_000_000_000 {
+	// 더하기 전에 비교한다. 큰 두 수를 더하면 int64가 넘쳐 검사를 통과할 수 있다
+	const maxMember = 1_000_000_000_000 // 회원 번호는 12자리
+	if m.Start <= 0 || m.Count <= 0 || m.Start >= maxMember || m.Count > maxMember-m.Start {
 		bad("members.start, count: 회원 번호는 1 이상 12자리 이하여야 한다")
 	}
 	if !pos(m.PrepRPS) || m.MaxTokenTTL <= 0 || m.RegisterWait < 0 || m.TokenMargin < 0 {
 		bad("members.prep_rps, max_token_ttl은 0보다 커야 한다")
 	}
 	s := c.Series
-	if s.Limit <= 0 || s.Names <= 0 || s.StatusesPerName <= 0 || s.Histogram <= 0 {
+	if s.Limit <= 0 || s.Names <= 0 || s.StatusesPerName <= 0 || s.Histogram <= 0 || s.CountersPerName < 0 || s.ExtraPerTask < 0 {
 		bad("series 값을 확인한다")
 	}
 	if !pos(c.SLO.P95MS, c.SLO.AbortErrorRate, c.SLO.Abort5xxRate) || !nonneg(c.SLO.Max5xxRate) || c.SLO.AbortAfter <= 0 {

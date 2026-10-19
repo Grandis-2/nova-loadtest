@@ -41,6 +41,8 @@ func TestParseRejects(t *testing.T) {
 		{"램프보다 짧은 단계", "step_duration: 5m", "step_duration: 5s", "step_duration"},
 		{"음수 배경 트래픽", "      cancel: 1\n", "      cancel: -1\n", "background.cancel"},
 		{"0초 gracefulStop", "entry_graceful_stop: 3m", "entry_graceful_stop: 0s", "entry_graceful_stop"},
+		{"음수 시계열 값", "counters_per_name: 2", "counters_per_name: -100", "series"},
+		{"회원 범위 넘침", "  start: 1 ", "  start: 9223372036854775000 ", "members.start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := string(embedded)

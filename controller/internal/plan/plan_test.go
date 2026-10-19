@@ -94,7 +94,7 @@ func TestMembersMatchDocs(t *testing.T) {
 	}{
 		{"stress", 31500, 6300},
 		{"soak", 72000, 14400},
-		{"spike", 8000, 731}, // 취소는 등록 대기 2분 + 본 시험 611초 동안 초당 1건
+		{"spike", 8000, 611}, // 배경 취소는 본 시험 611초 동안 초당 1건
 	} {
 		p := mustPlan(t, c, input(tc.scenario))
 		if p.Members.A.Count != tc.a || p.Members.C.Count != tc.c {
@@ -325,5 +325,32 @@ func TestDeterministicRepeated(t *testing.T) {
 				t.Fatalf("%s: 같은 입력인데 계획이 다르다", s)
 			}
 		}
+	}
+}
+
+// 배경 트래픽은 본 시험 시작부터 돈다. 등록 대기 중에 돌면 주문과 취소가 등록 전 예약을 찾는다
+func TestSpikeBackgroundStartsWithMain(t *testing.T) {
+	c := cfg(t)
+	p := mustPlan(t, c, input("spike"))
+	for _, s := range p.Scenarios {
+		if s.Flow == "entry" || s.Flow == "prepare" {
+			continue
+		}
+		if s.StartTime != secs(p.MainStart) {
+			t.Fatalf("배경 %s가 %s에 시작한다(본 시험 %ds)", s.Name, s.StartTime, p.MainStart)
+		}
+	}
+}
+
+// WAF 5분 창: 준비 요청은 등록 대기 앞에서 끝나므로, 준비 끝을 품는 창에는 본 시험이 (300 - 대기)초만 들어간다
+func TestWAFWindow(t *testing.T) {
+	c := cfg(t)
+	p := mustPlan(t, c, input("smoke"))
+	prep := float64(p.Members.B.Count + p.Members.C.Count)
+	wait := c.Members.RegisterWait.D().Seconds()
+	main := float64(p.MainEnd - p.MainStart)
+	want := math.Max(p.Estimates.PeakWAFRPS*math.Min(300, main), prep+p.Estimates.PeakWAFRPS*math.Min(main, 300-wait))
+	if got := p.Estimates.WAFPer5mPerTask; math.Abs(got-math.Round(want)) > 1 {
+		t.Fatalf("태스크당 5분 요청 %.0f건(기대 %.0f건)", got, want)
 	}
 }

@@ -422,12 +422,13 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		observe.rates["entry"] = observeRPS
 		phases = append(phases, burst, observe)
 		entryTotal = peak*float64(burstS) + observeRPS*float64(observeS)
-		// 배경 취소는 준비가 끝난 뒤(등록 대기 포함)부터 시험 끝까지 돈다
-		cancelTotal = bg["cancel"] * float64(int(cfg.Members.RegisterWait.D().Seconds())+mainLen)
+		// 배경은 본 시험 동안만 돈다(아래 build)
+		cancelTotal = bg["cancel"] * float64(mainLen)
 		build = func(ms int) {
-			// 배경은 준비가 끝난 뒤부터 시험 끝까지 돈다
-			bgStart := prepS
-			bgLen := ms + mainLen - bgStart
+			// 배경은 본 시험 시작(open_at)부터 끝까지 돈다. 등록 대기 중에 돌리면 주문과 취소가
+			// 아직 REGISTERED가 아닌 예약을 찾게 된다
+			bgStart := ms
+			bgLen := mainLen
 			for _, f := range flows {
 				if f == "entry" {
 					continue
@@ -529,8 +530,12 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 
 	// WAF 예외 없이 도는 시나리오: 태스크(IP) 하나가 5분 동안 보내는 요청
-	window := math.Min(300, float64(mainLen))
-	waf := (peakWAF*window + float64(poolB+poolC)*cfg.Flows["entry"].Requests) / float64(tasks)
+	// 5분 창은 두 경우 중 큰 쪽이다. 본 시험 안의 5분, 또는 준비 구간 끝을 품는 5분(준비 요청 + 등록 대기 뒤에 남는
+	// 본 시험 앞부분)이다. 준비는 등록 대기보다 앞에서 끝나므로 본 시험 5분 창에 통째로 더하지 않는다
+	prepReq := float64(poolB+poolC) * cfg.Flows["entry"].Requests
+	mainWin := peakWAF * math.Min(300, float64(mainLen))
+	prepWin := prepReq + peakWAF*math.Max(0, math.Min(float64(mainLen), float64(300-waitS)))
+	waf := math.Max(mainWin, prepWin) / float64(tasks)
 	if !sc.WAFExempt && waf > cfg.WAFLimitPer5m {
 		fail("태스크당 5분 요청 %.0f건이 WAF 예외 없는 상한 %.0f건을 넘는다", waf, cfg.WAFLimitPer5m)
 	}

@@ -5,11 +5,12 @@
 #   k6/test/e2e.sh ok       다섯 흐름 smoke(30초). 0으로 끝나고, 규칙 위반이 없고, 모든 경로를 불렀는지 본다
 #   k6/test/e2e.sh error    오류가 계속되면 중단 임계치로 99로 끝나는지 본다(약 1분 30초)
 #   k6/test/e2e.sh sigterm  도중에 멈추면 105로 끝나고 요약을 올리는지 본다
+#   k6/test/e2e.sh tokenfail 토큰을 받지 못하면 k6 를 띄우지 않고 120으로 끝나며, 오류를 담은 결과를 올리는지 본다
 #
 # 이미지는 미리 빌드해 둔다: docker buildx build --platform linux/amd64 -f k6/Dockerfile -t nova-loadtest/k6:dev --load .
 set -eu
 
-mode=${1:?ok, error, sigterm 중 하나}
+mode=${1:?ok, error, sigterm, tokenfail 중 하나}
 image=${K6_IMAGE:-nova-loadtest/k6:dev}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -53,7 +54,7 @@ curl -sf -X PUT "$AWS_ENDPOINT_URL/e2e-bucket" > /dev/null
 # 계획. ok 는 다섯 흐름, 나머지는 상품 조회만(준비 구간과 등록 대기가 없어 바로 시작한다)
 case "$mode" in
   ok) "$work/plan" -test-id "$test_id" -scenario smoke -duration 30s -product-id "$product" -json "$work/plan.json" ;;
-  error | sigterm) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
+  error | sigterm | tokenfail) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
   *) echo "모드 $mode 를 모른다" >&2; exit 2 ;;
 esac
 
@@ -65,6 +66,10 @@ if [ "$mode" = ok ]; then
   ttl=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token_ttl_seconds"])' "$work/plan.json")
   TEST_ID=$test_id TOKENS_URI=s3://e2e-bucket/tokens/$test_id/ MEMBERS=$members TASKS=1 TOKEN_TTL_SECONDS=$ttl \
     JWT_KEY_ID=e2e JWT_ISSUER=nova JWT_AUDIENCE=nova-api JWT_PRIVATE_KEY="$(cat "$work/key.pem")" "$work/token-minter"
+  tokens_env="-e TOKENS_URI=s3://e2e-bucket/tokens/$test_id/"
+fi
+if [ "$mode" = tokenfail ]; then
+  # 토큰 파일을 올리지 않은 위치를 준다
   tokens_env="-e TOKENS_URI=s3://e2e-bucket/tokens/$test_id/"
 fi
 
@@ -116,6 +121,11 @@ case "$mode" in
   sigterm)
     expect "외부 중지로 끝난 종료 코드" "$code" 105
     expect "올린 요약" "$uploaded" "105 True"
+    ;;
+  tokenfail)
+    expect "토큰 실패로 끝난 종료 코드" "$code" 120
+    expect "올린 결과(k6 요약 없음)" "$uploaded" "120 False"
+    expect "k6 를 띄우지 않아 fake-api 가 받은 요청" "$(printf '%s' "$stats" | python3 -c 'import json,sys; print(sum(json.load(sys.stdin)["routes"].values()))')" 0
     ;;
 esac
 exit "$fail"

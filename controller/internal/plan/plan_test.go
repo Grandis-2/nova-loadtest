@@ -3,6 +3,7 @@ package plan
 import (
 	"encoding/json"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,9 +93,10 @@ func TestMembersMatchDocs(t *testing.T) {
 		scenario string
 		a, c     int64
 	}{
-		{"stress", 31500, 6300},
-		{"soak", 72000, 14400},
-		{"spike", 8000, 611}, // 배경 취소는 본 시험 611초 동안 초당 1건
+		// 한 번만 쓰는 풀에는 태스크 상한(20)만큼 여유를 둔다. spike의 풀 A는 몰림과 관찰에 각각 둔다
+		{"stress", 31500 + 20, 6300 + 20},
+		{"soak", 72000 + 20, 14400 + 20},
+		{"spike", 8000 + 40, 611 + 20}, // 배경 취소는 본 시험 611초 동안 초당 1건
 	} {
 		p := mustPlan(t, c, input(tc.scenario))
 		if p.Members.A.Count != tc.a || p.Members.C.Count != tc.c {
@@ -352,5 +354,41 @@ func TestWAFWindow(t *testing.T) {
 	want := math.Max(p.Estimates.PeakWAFRPS*math.Min(300, main), prep+p.Estimates.PeakWAFRPS*math.Min(main, 300-wait))
 	if got := p.Estimates.WAFPer5mPerTask; math.Abs(got-math.Round(want)) > 1 {
 		t.Fatalf("태스크당 5분 요청 %.0f건(기대 %.0f건)", got, want)
+	}
+}
+
+// 토큰 파일은 태스크마다 나누고(mint.Split과 같은 방식), k6는 POOL_FROM/POOL_TO 구간을 반올림해 쓴다.
+// 태스크마다 몰림과 관찰 구간이 그 태스크가 돌릴 반복 수(올림)보다 크거나 같아야 회원이 모자라지 않는다
+func TestSpikePoolSplitPerTask(t *testing.T) {
+	c := cfg(t)
+	p := mustPlan(t, c, input("spike"))
+	var burst, observe *K6Scenario
+	for i := range p.Scenarios {
+		switch p.Scenarios[i].Name {
+		case "entry_burst":
+			burst = &p.Scenarios[i]
+		case "entry_observe":
+			observe = &p.Scenarios[i]
+		}
+	}
+	iters := func(s *K6Scenario) int64 {
+		d, _ := time.ParseDuration(s.Duration)
+		return int64(s.Rate) * int64(d.Seconds()) / 60
+	}
+	split, _ := strconv.ParseFloat(burst.Env["POOL_TO"], 64)
+	n := int64(p.Tasks)
+	a := p.Members.A.Count
+	for i := range n {
+		size := a / n
+		if i < a%n {
+			size++
+		}
+		to := int64(math.Round(split * float64(size)))
+		if need := (iters(burst) + n - 1) / n; to < need {
+			t.Fatalf("태스크 %d: 몰림 구간 %d명 < 반복 %d회", i, to, need)
+		}
+		if need := (iters(observe) + n - 1) / n; size-to < need {
+			t.Fatalf("태스크 %d: 관찰 구간 %d명 < 반복 %d회", i, size-to, need)
+		}
 	}
 }

@@ -38,8 +38,9 @@ function out(pool) {
 /** 풀 A 의 회원. 이 시나리오에 준 구간을 다 쓰면 null. */
 export function poolA() {
   const a = pools.a;
-  const from = Math.floor(Number(__ENV.POOL_FROM || '0') * a.length);
-  const to = Math.floor(Number(__ENV.POOL_TO || '1') * a.length);
+  // 경계를 반올림한다. 앞 시나리오의 끝과 뒤 시나리오의 시작이 같은 값으로 계산되어 겹치거나 비지 않는다
+  const from = Math.round(Number(__ENV.POOL_FROM || '0') * a.length);
+  const to = Math.round(Number(__ENV.POOL_TO || '1') * a.length);
   const i = from + iteration();
   return i < to ? a[i] : out('a');
 }

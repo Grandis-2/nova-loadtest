@@ -56,3 +56,39 @@ func TestWaitUntilStopsOnSignal(t *testing.T) {
 		t.Fatalf("기다리는 중에 멈추면 k6를 띄우지 않아야 한다: %v", err)
 	}
 }
+
+// 토큰을 받는 동안 멈춤 신호가 왔으면, 시작 시각이 비었거나 지났어도 k6를 띄우지 않는다
+func TestWaitUntilPendingSignal(t *testing.T) {
+	for _, startAt := range []string{"", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)} {
+		sigs := make(chan os.Signal, 1)
+		sigs <- syscall.SIGTERM
+		if err := waitUntil(startAt, sigs); err == nil {
+			t.Fatalf("START_AT %q: 이미 받은 신호가 있으면 띄우지 않아야 한다", startAt)
+		}
+	}
+}
+
+// k6 대신 셸 스크립트를 띄워 종료 코드를 본다
+func fakeK6(t *testing.T, body string) {
+	t.Helper()
+	p := t.TempDir() + "/k6"
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("K6_BIN", p)
+	t.Setenv("K6_SCRIPT", "/dev/null")
+}
+
+func TestRunK6ExitCodes(t *testing.T) {
+	fakeK6(t, "exit 99")
+	if code, detail := runK6(make(chan os.Signal)); code != 99 || detail != "" {
+		t.Fatalf("k6의 종료 코드를 그대로 돌려줘야 한다: %d %q", code, detail)
+	}
+
+	// 신호로 죽으면(예: 메모리 부족 SIGKILL) -1 대신 128 + 신호 번호와 신호 이름을 남긴다
+	fakeK6(t, "kill -9 $$")
+	code, detail := runK6(make(chan os.Signal))
+	if code != 128+9 || !strings.Contains(detail, "killed") {
+		t.Fatalf("SIGKILL이면 137과 신호 이름이어야 한다: %d %q", code, detail)
+	}
+}

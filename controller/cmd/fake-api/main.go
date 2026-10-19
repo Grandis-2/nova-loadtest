@@ -198,6 +198,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		}
 		ok(w, 201, map[string]any{"orderId": "22222222-0000-4000-8000-" + body.PreorderID[len(body.PreorderID)-12:], "reused": false})
 	case "POST /api/v1/orders/{id}/payment-attempts":
+		if _, good := s.auth(r); !good {
+			fail(w, 401, "UNAUTHENTICATED")
+			return
+		}
 		ok(w, 201, map[string]any{"tossOrderId": "fake-attempt", "amount": 1000})
 	default:
 		s.violate("unknown_route:" + route)

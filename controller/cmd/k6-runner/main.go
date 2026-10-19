@@ -83,20 +83,27 @@ func run() int {
 		log.Print(err)
 		return runnerFailed
 	}
-	if uri := os.Getenv("TOKENS_URI"); uri != "" {
-		bucket, prefix, err := parseURI(uri, "tokens", testID)
-		if err != nil {
+	// 상품 조회만 하는 시험은 토큰이 없어 TOKENS_URI가 비어 있다
+	tokensURI := os.Getenv("TOKENS_URI")
+	var tokensBucket, tokensPrefix string
+	if tokensURI != "" {
+		if tokensBucket, tokensPrefix, err = parseURI(tokensURI, "tokens", testID); err != nil {
 			log.Print(err)
-			return runnerFailed
-		}
-		if err := downloadTokens(ctx, client, bucket, prefix, task, tokensDir()); err != nil {
-			log.Printf("토큰 받기 실패: %v", err)
 			return runnerFailed
 		}
 	}
 	dest := destination{client, resultsBucket, resultsPrefix + "k6-" + task + ".json"}
-
 	res := result{TestID: testID, TaskIndex: task, ImageDigest: imageDigest(ctx)}
+	if tokensURI != "" {
+		if err := downloadTokens(ctx, client, tokensBucket, tokensPrefix, task, tokensDir()); err != nil {
+			// 토큰을 받지 못해도 이 태스크의 결과를 남긴다. 컨트롤러가 왜 끝났는지 볼 수 있게 한다
+			log.Printf("토큰 받기 실패: %v", err)
+			res.ExitCode, res.Error = runnerFailed, "토큰 받기 실패: "+err.Error()
+			dest.upload(ctx, res)
+			return runnerFailed
+		}
+	}
+
 	if err := waitUntil(os.Getenv("START_AT"), sigs); err != nil {
 		log.Print(err)
 		res.ExitCode, res.Error = runnerFailed, err.Error()
@@ -105,11 +112,11 @@ func run() int {
 	}
 
 	res.StartedAt = time.Now().UTC()
-	res.ExitCode = runK6(sigs)
+	res.ExitCode, res.Error = runK6(sigs)
 	res.EndedAt = time.Now().UTC()
 	if b, err := os.ReadFile(summaryPath()); err == nil && json.Valid(b) {
 		res.Summary = b
-	} else {
+	} else if res.Error == "" {
 		res.Error = "k6 요약 파일이 없다"
 	}
 	dest.upload(ctx, res)
@@ -172,6 +179,12 @@ func downloadTokens(ctx context.Context, c *s3.Client, bucket, prefix, task, dir
 
 // waitUntil은 START_AT(RFC 3339)까지 기다린다. 비어 있으면 바로 시작한다
 func waitUntil(startAt string, sigs <-chan os.Signal) error {
+	// 토큰을 받는 동안 이미 멈춤 신호가 왔으면, 시작 시각이 지났어도 k6를 띄우지 않는다
+	select {
+	case s := <-sigs:
+		return fmt.Errorf("시작 전에 %s를 받아 k6를 띄우지 않았다", s)
+	default:
+	}
 	if startAt == "" {
 		return nil
 	}
@@ -194,7 +207,7 @@ func waitUntil(startAt string, sigs <-chan os.Signal) error {
 }
 
 // runK6는 k6를 띄우고, 받은 신호를 넘기고, k6의 종료 코드를 돌려준다
-func runK6(sigs <-chan os.Signal) int {
+func runK6(sigs <-chan os.Signal) (code int, detail string) {
 	args := []string{"run", "--quiet"}
 	if seg := os.Getenv("SEGMENT"); seg != "" {
 		args = append(args, "--execution-segment", seg, "--execution-segment-sequence", os.Getenv("SEGMENT_SEQUENCE"))
@@ -211,7 +224,7 @@ func runK6(sigs <-chan os.Signal) int {
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		log.Printf("k6를 띄우지 못했다: %v", err)
-		return runnerFailed
+		return runnerFailed, "k6를 띄우지 못했다: " + err.Error()
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -223,13 +236,18 @@ func runK6(sigs <-chan os.Signal) int {
 		case err := <-done:
 			var exit *exec.ExitError
 			if errors.As(err, &exit) {
-				return exit.ExitCode()
+				// 신호로 죽으면(예: 메모리 부족으로 SIGKILL) ExitCode()가 -1이다. 셸 관례대로 128 + 신호 번호로 바꾸고
+				// 어떤 신호였는지 남긴다
+				if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+					return 128 + int(ws.Signal()), "k6가 신호 " + ws.Signal().String() + "로 끝났다"
+				}
+				return exit.ExitCode(), ""
 			}
 			if err != nil {
 				log.Printf("k6 실행 오류: %v", err)
-				return runnerFailed
+				return runnerFailed, "k6 실행 오류: " + err.Error()
 			}
-			return 0
+			return 0, ""
 		}
 	}
 }

@@ -10,7 +10,7 @@ export function preordersFlow() {
     return skipped('preorders', 'no_member');
   }
   const list = data(req('GET', '/api/v1/preorders', { token: m.token, needBody: true }));
-  req('GET', '/api/v1/preorders/active', { token: m.token });
+  req('GET', '/api/v1/preorders/active', { token: m.token, needBody: true });
   const first = list && list.items && list.items[0];
   if (first) {
     req('GET', '/api/v1/preorders/{id}', { path: { id: first.preorderId }, token: m.token });

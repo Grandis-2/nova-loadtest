@@ -423,7 +423,13 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		observe := phase{rates: clone(bg)}
 		observe.rates["entry"] = observeRPS
 		phases = append(phases, burst, observe)
-		entryTotal = peak*float64(burstS) + observeRPS*float64(observeS)
+		// 몰림과 관찰이 풀 A를 나눠 쓰므로 시나리오마다 여유를 둔다(아래 poolSlack)
+		burstN := peak*float64(burstS) + poolSlack(cfg)
+		observeN := 0.0
+		if observeRPS > 0 && observeS > 0 {
+			observeN = observeRPS*float64(observeS) + poolSlack(cfg)
+		}
+		entryTotal = burstN + observeN
 		// 배경은 본 시험 동안만 돈다(아래 build)
 		cancelTotal = bg["cancel"] * float64(mainLen)
 		build = func(ms int) {
@@ -441,7 +447,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			// 몰림의 회원은 입장할 때까지 VU를 하나씩 잡는다
 			addConstant("entry_burst", "entry", peak, ms+1, burstS, peak*float64(burstS))
 			// 몰림과 관찰이 풀 A를 앞뒤로 나눠 쓴다. 회원 한 명은 시험 하나에서 한 번만 진입한다
-			split := fmt.Sprintf("%.6f", peak*float64(burstS)/entryTotal)
+			split := fmt.Sprintf("%.6f", burstN/entryTotal)
 			scenarios[len(scenarios)-1].Env = map[string]string{"POOL_FROM": "0", "POOL_TO": split}
 			addConstant("entry_observe", "entry", observeRPS, ms+1+burstS, observeS, observeRPS*entryIter)
 			if observeRPS > 0 && observeS > 0 {
@@ -451,8 +457,12 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		}
 	}
 
+	// 풀 A(spike는 위에서 시나리오마다 더했다)와 풀 C에도 여유를 둔다
+	if sc.Shape != config.ShapeSpike {
+		entryTotal += poolSlack(cfg)
+	}
 	if usesPool(config.PoolC) {
-		poolC = int64(math.Ceil(cancelTotal))
+		poolC = int64(math.Ceil(cancelTotal + poolSlack(cfg)))
 	}
 	if n := poolB + poolC; n > 0 {
 		prepS = int(math.Ceil(float64(n) / cfg.Members.PrepRPS))
@@ -635,6 +645,11 @@ func setVUs(s *K6Scenario, est, factor float64) {
 }
 
 func perMinute(rps float64) int { return max(1, int(math.Round(rps*60))) }
+
+// poolSlack은 한 번만 쓰는 풀(A, C)에 더하는 여유다. 토큰 파일은 mint.Split이 앞쪽 태스크에 하나씩 더 주는 방식으로
+// 나누고, k6의 반복은 실행 구간(segment) 방식으로 나눈다. 두 방식이 달라 태스크마다 많아야 1명씩 모자랄 수 있으므로
+// 태스크 상한만큼 더 둔다
+func poolSlack(cfg *config.Config) float64 { return float64(cfg.Runner.MaxTasks) }
 
 // quant는 초당 도착률을 k6가 쓰는 1분당 정수 반복으로 맞춘 값이다
 func quant(rps float64) float64 { return float64(perMinute(rps)) / 60 }

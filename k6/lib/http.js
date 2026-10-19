@@ -73,8 +73,8 @@ export function req(method, template, o = {}) {
     headers,
     tags: { name: template },
     responseCallback: callback(o.expect || [200]),
-    // 본문은 기본으로 버린다(discardResponseBodies). 오류 코드를 세려면 본문이 필요하므로 needBody 가 아니어도
-    // 오류만 세고 싶은 요청은 needBody 를 켠다
+    // 본문은 기본으로 버린다(discardResponseBodies). 오류 코드(error.code)는 본문을 받은 요청에서만 읽을 수 있다.
+    // 본문이 큰 상품 조회는 받지 않으므로 오류를 HTTP_<상태>로 센다. 그 밖의 요청은 needBody 를 켠다
     responseType: o.needBody ? 'text' : 'none',
   });
   if (res.status >= 400) {

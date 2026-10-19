@@ -40,11 +40,12 @@ local/forgejo/mirror.sh my-branch  # 브랜치로 올린다
 
 ```sh
 go run ./controller/cmd/scenarios              # stress 를 뺀 모든 각본(몇 시간 걸린다)
-go run ./controller/cmd/scenarios pass cancel  # 고른 각본만
+go run ./controller/cmd/scenarios pass manual-stop  # 고른 각본만
 go run ./controller/cmd/scenarios -long        # stress 한계 각본까지
 ```
 
 - 각본마다 fake-cluster의 각본을 바꾸고, 워크플로를 dispatch 하고, 끝나면 워크플로 결과, `summary.json`(moto), 가짜 ECS가 받은 요청, 실행 로그를 확인한다. 각본 목록과 기대는 [구현 계획 7.2](../docs/implementation-plan.md#72-단계별-시험)에 있다.
+- `cancel` 각본은 기본 목록에 없다. Forgejo는 실행을 취소하면 `if: always()` 뒷정리를 돌리지 않아서, 이 각본은 실패하고 가짜 태스크를 남긴다. 취소 뒤 뒷정리는 GitHub에서 확인한다([구현 계획 7.3](../docs/implementation-plan.md#73-두-곳에서-다른-것)).
 - 각본이 도는 동안 `mirror.sh`를 돌리지 않는다. `ci.yml`이 같이 돌아 러너를 나눠 쓴다.
 - 코드를 바꿨으면 `mirror.sh`로 올리고, fake 서버를 바꿨으면 `docker compose -f local/compose.yml up -d --build fake-cluster fake-api`로 다시 띄운다.
 

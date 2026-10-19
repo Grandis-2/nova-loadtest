@@ -23,6 +23,7 @@ import (
 	"github.com/Grandis-2/nova-loadtest/controller/internal/clock"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/fakeecs"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/plan"
+	"github.com/Grandis-2/nova-loadtest/controller/internal/runner"
 )
 
 // 로컬 값. 모두 가짜다
@@ -227,9 +228,15 @@ func (s *Server) setScenario(w http.ResponseWriter, r *http.Request) {
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	f := s.ecs()
 	sc := s.current()
-	running, _ := f.ListTasks(r.Context(), listInput(Cluster))
+	// 멈추는 중(StopTask 를 받았지만 아직 STOPPED 가 아님)인 태스크도 도는 것으로 센다. 컨트롤러와 같은 방법이다
+	running, err := (&runner.Runner{ECS: f, Cluster: Cluster, Clock: clock.Real{}}).ListRunning(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	runs, stops := f.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"scenario": sc.Name, "runs": f.Runs, "stops": f.Stops, "running": running.TaskArns})
+	json.NewEncoder(w).Encode(map[string]any{"scenario": sc.Name, "runs": runs, "stops": stops, "running": running})
 }
 
 // inject 는 다른 시험의 k6 태스크를 하나 띄운다(정리 거절 각본). 멈출 때까지 돈다

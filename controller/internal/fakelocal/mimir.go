@@ -8,9 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/ecs"
 )
 
 // flowNames 는 흐름마다 반드시 보내는 요청 이름이다(controller/internal/control 의 flowName 과 같다)
@@ -95,6 +92,11 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 				window = wi
 			}
 		}
+		rates := map[string]float64{}
+		for _, fr := range p.FlowRates {
+			// 요청 수는 흐름 시작 수 × 흐름 하나의 요청 수다. 판정의 가중 평균이 계획의 흐름 비율대로 나오게 한다
+			rates[flowNames[fr.Flow]] = fr.PeakRPS * s.Config.Flows[fr.Flow].Requests
+		}
 		for _, name := range names(p.Flows) {
 			v := 0.0
 			switch {
@@ -103,7 +105,7 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 			case strings.Contains(q, `status=~"5.."`):
 				v = 0
 			default:
-				v = float64(rng) * 5 // 초당 5건
+				v = float64(rng) * rates[name]
 			}
 			out = append(out, sample{Metric: map[string]string{"name": name}, Value: [2]any{ts, fmtFloat(v)}})
 		}
@@ -148,7 +150,3 @@ func fmtFloat(v float64) string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
-
-func listInput(cluster string) *ecs.ListTasksInput {
-	return &ecs.ListTasksInput{Cluster: aws.String(cluster)}
-}

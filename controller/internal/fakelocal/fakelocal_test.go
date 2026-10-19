@@ -2,9 +2,12 @@ package fakelocal
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -150,5 +153,64 @@ func TestMimirScenarios(t *testing.T) {
 	_, byName, _ := m.Window(ctx, start.Add(time.Duration(w.Start)*time.Second), start.Add(time.Duration(w.End)*time.Second))
 	if byName["/api/v1/orders"].Within != 0.90 {
 		t.Fatalf("결제 흐름만 90%%: %+v", byName)
+	}
+}
+
+// /state 의 running 은 멈추는 중인 태스크도 센다. 동시에 RunTask 가 와도 기록을 안전하게 읽는다(-race)
+func TestStateCountsStoppingAndIsSafe(t *testing.T) {
+	s, c, _ := newServer(t, "manual-stop")
+	_, _, controlH := s.Handlers()
+	cs := httptest.NewServer(controlH)
+	t.Cleanup(cs.Close)
+	r := &runner.Runner{ECS: c, Cluster: Cluster, Clock: clock.Real{}}
+	task := infra.Task{TaskDefinition: FamilyK6, Container: "k6", Subnets: []string{"s"}, SecurityGroups: []string{"g"}, AssignPublicIP: "ENABLED"}
+	arn, err := r.Run(context.Background(), task, testID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Stop(context.Background(), []string{arn}, "test")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 20 {
+			r.Run(context.Background(), task, "lt-20261020t0700-2", nil)
+		}
+	}()
+	var st struct {
+		Running []string `json:"running"`
+		Stops   []string `json:"stops"`
+	}
+	for range 20 {
+		resp, err := http.Get(cs.URL + "/state")
+		if err != nil {
+			t.Fatal(err)
+		}
+		json.NewDecoder(resp.Body).Decode(&st)
+		resp.Body.Close()
+	}
+	<-done
+	if !slices.Contains(st.Running, arn) || len(st.Stops) != 1 {
+		t.Fatalf("멈추는 중인 태스크가 running 에 있어야 한다: %+v", st)
+	}
+}
+
+// 흐름별 요청 수는 계획의 흐름 비율(시작 수 × 흐름 하나의 요청 수)대로다
+func TestMimirFlowWeights(t *testing.T) {
+	m, p, start := metricsFor(t, "pass")
+	cfg, _ := config.Default()
+	w := p.Windows[0]
+	_, byName, err := m.Window(context.Background(), start.Add(time.Duration(w.Start)*time.Second), start.Add(time.Duration(w.End)*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range p.FlowRates {
+		name := flowNames[fr.Flow]
+		want := fr.PeakRPS * cfg.Flows[fr.Flow].Requests * float64(w.End-w.Start)
+		if got := byName[name].Requests; math.Abs(got-want) > 1e-6 {
+			t.Errorf("%s: 요청 수 %v, 기대 %v", name, got, want)
+		}
+	}
+	if byName["/api/v1/products"].Requests == byName["/api/v1/orders"].Requests {
+		t.Fatal("흐름마다 요청 수가 달라야 한다")
 	}
 }

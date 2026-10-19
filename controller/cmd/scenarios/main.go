@@ -300,6 +300,9 @@ func cases() []Case {
 				if !strings.Contains(o.logs, "끝나지 않은 시험") {
 					return errors.New("끝나지 않은 시험이라 거절해야 한다")
 				}
+				if o.state.runsOf(fakelocal.FamilyData) != 0 {
+					return errors.New("정리 태스크를 띄우지 않아야 한다")
+				}
 				return nil
 			}},
 		{Name: "cleanup-other-test", Workflow: "cleanup.yml", Conclusion: "failure", Inputs: map[string]string{"test_id": "lt-20261019t0000-905"},
@@ -416,6 +419,10 @@ func (r *runner) run(c Case) error {
 			return fmt.Errorf("준비: %w", err)
 		}
 	}
+	before, err := r.summaries()
+	if err != nil {
+		return fmt.Errorf("결과 목록: %w", err)
+	}
 	run, err := r.dispatch(c.Workflow, c.Inputs)
 	if err != nil {
 		return err
@@ -434,7 +441,9 @@ func (r *runner) run(c Case) error {
 		}
 	}
 	o := &outcome{run: run, status: status}
-	o.logs = r.logs(run)
+	if o.logs, err = r.logs(run); err != nil {
+		return fmt.Errorf("실행 로그: %w", err)
+	}
 	if o.state, err = r.state(); err != nil {
 		return err
 	}
@@ -448,9 +457,14 @@ func (r *runner) run(c Case) error {
 	}
 	if c.Result != "" {
 		if c.Result == "-" {
-			if o.testID != "" {
-				if _, err := r.get("results/" + o.testID + "/summary.json"); err == nil {
-					return errors.New("summary.json 이 없어야 한다")
+			// 태스크가 하나도 뜨지 않으면 시험 ID 를 모르므로, 실행 전후의 summary.json 목록을 비교한다
+			after, err := r.summaries()
+			if err != nil {
+				return fmt.Errorf("결과 목록: %w", err)
+			}
+			for key := range after {
+				if !before[key] {
+					return fmt.Errorf("summary.json 이 없어야 한다: %s", key)
 				}
 			}
 		} else {
@@ -552,25 +566,61 @@ func (r *runner) wait(run int, limit time.Duration) (string, error) {
 	return "", fmt.Errorf("실행 %d 가 %s 안에 끝나지 않았다", run, limit)
 }
 
-// logs 는 실행의 작업 로그를 모두 합친다
-func (r *runner) logs(run int) string {
+// logs 는 실행의 작업 로그를 모두 합친다. 하나라도 받지 못하면 오류다
+// (로그가 비면 "로그에 비밀이 없다" 같은 확인이 아무것도 보지 않고 통과한다)
+func (r *runner) logs(run int) (string, error) {
 	var jobs []struct {
-		ID int `json:"id"`
+		ID     int    `json:"id"`
+		Status string `json:"status"`
 	}
 	if err := r.forgejo(http.MethodGet, fmt.Sprintf("/actions/runs/%d/jobs", run), nil, &jobs); err != nil {
-		return ""
+		return "", err
 	}
 	var sb strings.Builder
+	read := 0
 	for _, j := range jobs {
+		if j.Status == "skipped" {
+			continue // 앞 작업이 실패해 돌지 않은 작업에는 로그가 없다
+		}
+		read++
 		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/actions/jobs/%d/logs", forgejo, j.ID), nil)
 		req.Header.Set("Authorization", r.auth)
-		if resp, err := r.http.Do(req); err == nil {
-			b, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			sb.Write(b)
+		resp, err := r.http.Do(req)
+		if err != nil {
+			return "", err
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("작업 %d 로그: HTTP %d", j.ID, resp.StatusCode)
+		}
+		sb.Write(b)
+	}
+	if read == 0 {
+		return "", fmt.Errorf("실행 %d 에 로그가 있는 작업이 없다", run)
+	}
+	return sb.String(), nil
+}
+
+// summaries 는 지금 moto 에 있는 summary.json 의 키다
+func (r *runner) summaries() (map[string]bool, error) {
+	out := map[string]bool{}
+	p := s3.NewListObjectsV2Paginator(r.s3, &s3.ListObjectsV2Input{Bucket: aws.String(fakelocal.Bucket), Prefix: aws.String("results/")})
+	for p.HasMorePages() {
+		page, err := p.NextPage(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range page.Contents {
+			if strings.HasSuffix(aws.ToString(o.Key), "/summary.json") {
+				out[aws.ToString(o.Key)] = true
+			}
 		}
 	}
-	return sb.String()
+	return out, nil
 }
 
 func (r *runner) post(url string, body io.Reader) error {

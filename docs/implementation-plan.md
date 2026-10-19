@@ -207,7 +207,7 @@ nova-loadtest/
 - `stop`: `startedBy=<시험 ID>`인 k6 태스크를 멈춘다. 컨트롤러가 끝까지 남아 "중단" 결과를 쓴다. k6를 띄우기 전(토큰 발급 중)이면 컨트롤러와 발급기를 멈춰 k6가 뜨지 않게 한다. 이때는 결과가 남지 않아 판정 불가로 끝난다.
 - `cleanup`: 입력은 시험 ID 하나다. `results/<test_id>/summary.json`이 있는지 보고(끝난 시험만), `tasks.data`가 없으면 바로 실패한다. 컨트롤러를 정리 모드로 띄우고 기다린다. `startedBy`는 `<시험 ID>-c`로 해 시험 태스크와 가른다.
 - `loadtest.yml`은 `concurrency: { group: loadtest, cancel-in-progress: false }`. 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라, 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook에 적는다).
-- `build.yml`은 이 그룹에 넣지 않는다(기다리던 빌드가 시험 실행에 밀려 취소된다). 커밋 해시 태그를 올린 뒤, `promote` 작업 하나가 시험 클러스터의 RUNNING 태스크를 `ListTasks`로 보고 없을 때만 세 이미지의 `latest`를 한꺼번에 옮긴다. 이미지 하나라도 올리지 못했거나, 실행한 커밋이 main의 마지막 커밋이 아니거나, 태스크가 있으면 옮기지 않고 실패한다. 옮긴 뒤에도 한 번 더 보고, 그 사이에 시험이 시작됐으면 실패로 알린다. 빌드끼리는 동시 실행 그룹 `build`로 push 순서대로 돌려 오래된 커밋이 `latest`를 덮지 않게 한다. 남는 틈은 컨트롤러가 막는다: 시작 시각 전에 k6 태스크들의 `imageDigest`(`DescribeTasks`)가 다르면 시험을 취소한다
+- `build.yml`은 이 그룹에 넣지 않는다(기다리던 빌드가 시험 실행에 밀려 취소된다). 커밋 해시 태그를 올린 뒤, `promote` 작업 하나가 시험 클러스터의 RUNNING 태스크를 `ListTasks`로 보고 없을 때만 세 이미지의 `latest`를 한꺼번에 옮긴다. 옮길 때는 ECR API로 커밋 태그의 매니페스트를 읽어(`BatchGetImage`) `latest`로 다시 쓴다(`PutImage`). 레이어를 내려받지 않으므로 빌드 역할에 `ecr:GetDownloadUrlForLayer`가 없어도 된다(`docker buildx imagetools create`는 이 권한이 없어 실패했다). 이미지 하나라도 올리지 못했거나, 실행한 커밋이 main의 마지막 커밋이 아니거나, 태스크가 있으면 옮기지 않고 실패한다. 옮긴 뒤에도 한 번 더 보고, 그 사이에 시험이 시작됐으면 실패로 알린다. 빌드끼리는 동시 실행 그룹 `build`로 push 순서대로 돌려 오래된 커밋이 `latest`를 덮지 않게 한다. 남는 틈은 컨트롤러가 막는다: 시작 시각 전에 k6 태스크들의 `imageDigest`(`DescribeTasks`)가 다르면 시험을 취소한다
 
 **SSM 값 형식**(인프라가 정했다. 경로 `/nova-prod/loadtest/run-task`, `/nova-prod/loadtest/observability`, String, 값은 JSON)
 

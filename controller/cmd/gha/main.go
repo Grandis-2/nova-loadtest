@@ -7,6 +7,7 @@
 //	gha cleanup   cleanup.yml: 컨트롤러를 정리 모드로 띄우고 기다린다
 //	gha ecr-login build.yml: ECR 에 docker login 한다(비밀번호는 가린 뒤 표준 입력으로 넘긴다)
 //	gha idle      build.yml: 시험 클러스터에 도는 태스크가 없는지 본다(있으면 latest 를 옮기지 않는다)
+//	gha promote   build.yml: 세 저장소의 커밋 태그(SHA) 매니페스트를 latest 로 다시 쓴다
 //
 // 입력은 환경 변수로 받는다(LT_<이름>, TEST_ID, PLANNED_AT, AWS_ROLE_ARN 등). docs/configuration.md 참고.
 package main
@@ -94,6 +95,8 @@ func run(ctx context.Context, cmd string) error {
 		return gha.Cleanup(ctx, e, testID)
 	case "ecr-login":
 		return ecrLogin(ctx, ecr.NewFromConfig(awsCfg))
+	case "promote":
+		return gha.Promote(ctx, ecr.NewFromConfig(awsCfg), gha.Repos, os.Getenv("SHA"))
 	case "idle":
 		return gha.Idle(ctx, e, os.Getenv("LOADTEST_CLUSTER"))
 	}
@@ -107,7 +110,7 @@ func checkImages(ctx context.Context, roleARN string) error {
 		return err
 	}
 	c := ecr.NewFromConfig(awsCfg)
-	for _, repo := range []string{"nova/loadtest-k6", "nova/loadtest-controller", "nova/loadtest-token-minter"} {
+	for _, repo := range gha.Repos {
 		_, err := c.DescribeImages(ctx, &ecr.DescribeImagesInput{
 			RepositoryName: aws.String(repo), ImageIds: []ecrtypes.ImageIdentifier{{ImageTag: aws.String("latest")}},
 		})

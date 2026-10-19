@@ -176,3 +176,18 @@ func TestCleanupAlreadyRunning(t *testing.T) {
 		t.Fatalf("먼저 띄운 정리 태스크가 돌면 거절해야 한다: %v", err)
 	}
 }
+
+// 다른 시험이 멈추는 중(StopTask 를 받았지만 아직 STOPPED 가 아님)이어도 정리를 거절한다
+func TestCleanupOtherTestStopping(t *testing.T) {
+	f, self := cleanupFixture(t)
+	f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: time.Second, StopDelay: 2 * time.Minute}
+	}
+	arn, _ := f.deps.Runner.Run(context.Background(), f.run.RunTask.Tasks["k6"], "lt-20261020t0700-2", nil)
+	f.clock.Sleep(context.Background(), 5*time.Second)
+	f.deps.Runner.Stop(context.Background(), []string{arn}, "끝")
+	_, err := Cleanup(context.Background(), f.deps, fakeQueues{}, f.run.Config, f.run.RunTask, testID, self)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "lt-20261020t0700-2") {
+		t.Fatalf("멈추는 중인 다른 시험이 있으면 거절해야 한다: %v", err)
+	}
+}

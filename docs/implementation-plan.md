@@ -41,7 +41,7 @@ nova-loadtest/
 ├── controller/                  컨트롤러(Go)
 │   ├── cmd/controller/          태스크 진입점
 │   ├── cmd/plan/                입력 확인. 러너도 이 명령으로 계획을 계산한다
-│   ├── cmd/gha/                 러너에서 도는 명령: 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지
+│   ├── cmd/gha/                 러너에서 도는 명령: 계획, 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지, 정리, ECR 로그인
 │   ├── cmd/k6-runner/           k6 이미지의 시작 프로그램: 토큰 받기 → START_AT 대기 → k6 run → 요약 올리기
 │   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
 │   ├── cmd/fake-mimir/          로컬·CI 시험용. 정해 둔 각본(합격, 오류율 초과, 지표 끊김 등)대로 PromQL 에 답한다
@@ -55,6 +55,7 @@ nova-loadtest/
 │       ├── control/             시험 한 번의 흐름(발급 → k6 → 감시 → 판정 → 결과)과 정리 모드
 │       ├── report/              summary.json, summary.md
 │       ├── awsio/               S3, SQS 를 control 의 인터페이스에 맞춤
+│       ├── gha/                 cmd/gha 의 로직: 실행 위치 확인, 입력, 값 가리기, 사전 점검, OIDC 세션 갱신, 결과 정리
 │       ├── clock/               시계(테스트는 가짜 시계로 시간을 바로 흘린다)
 │       └── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-ecs 서버가 같이 쓴다
 ├── token-minter/                토큰 발급기(Go, distroless)
@@ -189,7 +190,7 @@ nova-loadtest/
 | 워크플로 | 작업(job) | 역할 |
 |---|---|---|
 | `ci.yml` | workflow-lint, lint-test, k6-inspect, image-build, k6-safety(7.2의 2단계) | 없음 |
-| `build.yml` | build-push(이미지 3개 행렬) | `nova-prod-loadtest-github-build` |
+| `build.yml` | build-push(이미지 3개 행렬, 커밋 태그) → promote(`latest` 세 개를 한꺼번에) | `nova-prod-loadtest-github-build` |
 | `loadtest.yml` | `plan` → `run`(environment `loadtest`) | `plan`은 build 역할로 ECR만 조회한다. `run`은 `nova-prod-loadtest-github-run` |
 | `stop.yml` | stop | `nova-prod-loadtest-github-build` |
 | `cleanup.yml` | cleanup(environment `loadtest`) | `nova-prod-loadtest-github-run` |
@@ -201,10 +202,10 @@ nova-loadtest/
   - 결과 정리: S3 결과를 실행 요약과 Slack으로 보낸다. Slack 웹훅은 GitHub 비밀이다.
   - 뒷정리: `if: always()`. 역할을 다시 받은 뒤 `startedBy=<시험 ID>`인 태스크를 모두 멈추고 토큰을 지운다.
   - 마지막 단계에서 판정 결과가 합격이 아니면 작업을 실패로 끝낸다.
-- `stop`: `startedBy=<시험 ID>`인 k6 태스크를 멈춘다. 컨트롤러가 끝까지 남아 "중단" 결과를 쓴다.
+- `stop`: `startedBy=<시험 ID>`인 k6 태스크를 멈춘다. 컨트롤러가 끝까지 남아 "중단" 결과를 쓴다. k6를 띄우기 전(토큰 발급 중)이면 컨트롤러와 발급기를 멈춰 k6가 뜨지 않게 한다. 이때는 결과가 남지 않아 판정 불가로 끝난다.
 - `cleanup`: 입력은 시험 ID 하나다. `results/<test_id>/summary.json`이 있는지 보고(끝난 시험만), `tasks.data`가 없으면 바로 실패한다. 컨트롤러를 정리 모드로 띄우고 기다린다. `startedBy`는 `<시험 ID>-c`로 해 시험 태스크와 가른다.
 - `loadtest.yml`은 `concurrency: { group: loadtest, cancel-in-progress: false }`. 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라, 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook에 적는다).
-- `build.yml`은 이 그룹에 넣지 않는다(기다리던 빌드가 시험 실행에 밀려 취소된다). 커밋 해시 태그를 올린 뒤 시험 클러스터의 RUNNING 태스크를 `ListTasks`로 보고, 없을 때만 `latest`를 옮긴다. 있으면 `latest`를 옮기지 않고 실패한다. 남는 틈은 컨트롤러가 막는다: 시작 시각 전에 k6 태스크들의 `imageDigest`(`DescribeTasks`)가 다르면 시험을 취소한다
+- `build.yml`은 이 그룹에 넣지 않는다(기다리던 빌드가 시험 실행에 밀려 취소된다). 커밋 해시 태그를 올린 뒤, `promote` 작업 하나가 시험 클러스터의 RUNNING 태스크를 `ListTasks`로 보고 없을 때만 세 이미지의 `latest`를 한꺼번에 옮긴다. 이미지 하나라도 올리지 못했거나, 실행한 커밋이 main의 마지막 커밋이 아니거나, 태스크가 있으면 옮기지 않고 실패한다. 옮긴 뒤에도 한 번 더 보고, 그 사이에 시험이 시작됐으면 실패로 알린다. 빌드끼리는 동시 실행 그룹 `build`로 push 순서대로 돌려 오래된 커밋이 `latest`를 덮지 않게 한다. 남는 틈은 컨트롤러가 막는다: 시작 시각 전에 k6 태스크들의 `imageDigest`(`DescribeTasks`)가 다르면 시험을 취소한다
 
 **SSM 값 형식**(인프라가 정했다. 경로 `/nova-prod/loadtest/run-task`, `/nova-prod/loadtest/observability`, String, 값은 JSON)
 

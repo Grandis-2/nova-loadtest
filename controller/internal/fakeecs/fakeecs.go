@@ -26,6 +26,7 @@ type Behavior struct {
 	StopExitCode int32 // StopTask 를 받으면 이 코드로 끝난다(k6 는 105)
 	ImageDigest  string
 	HiddenFor    time.Duration // RunTask 뒤 이만큼 DescribeTasks 에 나오지 않는다(ECS 조회가 늦게 반영되는 경우)
+	StopDelay    time.Duration // StopTask 뒤 STOPPED 가 되기까지. 그동안 desiredStatus 는 STOPPED, lastStatus 는 STOPPING 이다
 }
 
 // RunCall은 받은 RunTask 하나다. 덮어쓰기를 검사하는 데 쓴다.
@@ -49,6 +50,7 @@ type task struct {
 	created                                    time.Time
 	b                                          Behavior
 	stoppedAt                                  *time.Time
+	stopRequested                              bool
 	stopReason                                 string
 }
 
@@ -107,6 +109,9 @@ func (t *task) status(now time.Time) (string, *int32) {
 	if t.stoppedAt != nil && !now.Before(*t.stoppedAt) {
 		c := t.b.StopExitCode
 		return "STOPPED", &c
+	}
+	if t.stopRequested {
+		return "STOPPING", nil
 	}
 	if t.b.Never {
 		return "PROVISIONING", nil
@@ -191,8 +196,16 @@ func (f *Fake) ListTasks(_ context.Context, in *ecs.ListTasksInput, _ ...func(*e
 		if in.StartedBy != nil && t.startedBy != aws.ToString(in.StartedBy) {
 			continue
 		}
-		// ECS 의 ListTasks 는 기본으로 desiredStatus RUNNING 인 태스크만 준다
-		if st, _ := t.status(now); st == "STOPPED" {
+		// ECS 의 ListTasks 는 desiredStatus 로 거른다(기본 RUNNING). StopTask 를 받았거나 끝난 태스크는 STOPPED 다
+		desired := "RUNNING"
+		if st, _ := t.status(now); st == "STOPPED" || t.stopRequested {
+			desired = "STOPPED"
+		}
+		want := "RUNNING"
+		if in.DesiredStatus != "" {
+			want = string(in.DesiredStatus)
+		}
+		if desired != want {
 			continue
 		}
 		out.TaskArns = append(out.TaskArns, t.arn)
@@ -211,8 +224,8 @@ func (f *Fake) StopTask(_ context.Context, in *ecs.StopTaskInput, _ ...func(*ecs
 		return nil, fmt.Errorf("task %s not found", arn)
 	}
 	if st, _ := t.status(f.Clock.Now()); st != "STOPPED" {
-		now := f.Clock.Now()
-		t.stoppedAt, t.stopReason = &now, aws.ToString(in.Reason)
+		at := f.Clock.Now().Add(t.b.StopDelay)
+		t.stoppedAt, t.stopReason, t.stopRequested = &at, aws.ToString(in.Reason), true
 	}
 	return &ecs.StopTaskOutput{}, nil
 }

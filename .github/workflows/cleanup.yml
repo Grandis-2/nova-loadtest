@@ -1,0 +1,47 @@
+name: cleanup
+
+# 회차를 마감한 뒤 시험 ID 의 시험 데이터를 정리한다. 정리 대상은 입력으로 받지 않고 그 시험의 plan.json 에서 읽는다.
+on:
+  workflow_dispatch:
+    inputs:
+      test_id:
+        description: 시험 ID(lt-yyyymmddthhmm-번호)
+        required: true
+
+# 같은 시험을 두 번 정리하지 않는다. 컨트롤러도 <시험 ID>-d 태스크가 돌면 거절한다
+concurrency:
+  group: cleanup-${{ inputs.test_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: loadtest
+    # 큐 대기 30분 + 정리 태스크 1시간
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: build
+        run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
+
+      - name: cleanup
+        env:
+          AWS_REGION: ap-northeast-2
+          AWS_ROLE_ARN: ${{ secrets.AWS_RUN_ROLE_ARN }}
+          TEST_ID: ${{ inputs.test_id }}
+        run: '"$RUNNER_TEMP/gha" cleanup'

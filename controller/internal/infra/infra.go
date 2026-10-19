@@ -86,6 +86,18 @@ func ParseRunTask(raw string, mode Mode) (*RunTask, error) {
 	return &r, nil
 }
 
+// Task 는 이름의 태스크 설정이다. 없거나 필수 값이 비면 오류다(controller 는 ParseRunTask 가 보지 않는다)
+func (r *RunTask) Task(name string) (Task, error) {
+	t, ok := r.Tasks[name]
+	if !ok {
+		return t, fmt.Errorf("RUN_TASK: tasks.%s가 없다", name)
+	}
+	if errs := t.check(name); len(errs) > 0 {
+		return t, errors.New("RUN_TASK: " + strings.Join(errs, ", "))
+	}
+	return t, nil
+}
+
 func (t Task) check(name string) []string {
 	var errs []string
 	if t.TaskDefinition == "" || t.Container == "" {

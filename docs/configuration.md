@@ -81,6 +81,28 @@ flowchart LR
 
 ## 실행할 때 넘기는 값
 
+### 워크플로가 러너 명령(`cmd/gha`)에 넘기는 값
+
+워크플로는 셸 스크립트 대신 `cmd/gha`의 하위 명령(`plan`, `run`, `after`, `stop`, `cleanup`, `ecr-login`, `idle`)을 부른다. 값은 모두 환경 변수로 넘긴다. 워크플로 입력을 `run:` 안에 `${{ }}`로 넣지 않는 것은 셸 주입을 막기 위해서이다.
+
+| 환경 변수 | 쓰는 명령 | 내용 |
+|---|---|---|
+| `INPUT_SCENARIO`, `INPUT_PRODUCT_ID`, `INPUT_PREP_PRODUCT_ID`, `INPUT_OPEN_AT`, `INPUT_PEAK_RPS`, `INPUT_DURATION`, `INPUT_RAMP_UP`, `INPUT_RUNNERS`, `INPUT_FLOWS`, `INPUT_ABORT_ERROR_RATE` | `plan`, `run` | `loadtest.yml`의 입력. 비우면 `scenarios.yml`의 기본값이다. `INPUT_FLOWS`는 쉼표로 구분한다. `INPUT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
+| `TEST_ID` | `run`, `after`, `stop`, `cleanup` | 시험 ID. `run`, `after`는 `plan` 작업의 출력을 받고, `stop`, `cleanup`은 입력을 받아 형식을 검사한다 |
+| `PLANNED_AT` | `run` | `plan` 작업이 계획한 시각(RFC3339). `run`은 이 시각으로 계획을 다시 계산해 `INPUT_JSON`의 `planned_at`에 넣는다 |
+| `AWS_ROLE_ARN` | `plan`(이미지 확인), 나머지 모두 | 맡을 역할. GitHub 비밀 `AWS_BUILD_ROLE_ARN` 또는 `AWS_RUN_ROLE_ARN`에서 받는다. `ACTIONS_ID_TOKEN_REQUEST_URL`이 있을 때만 맡고, 세션이 끝나기 10분 전에 OIDC 토큰을 다시 받아 세션을 바꾼다 |
+| `AWS_REGION` | 모두 | `ap-northeast-2` |
+| `CHECK_IMAGES` | `plan` | `1`이면 ECR 세 저장소에 `latest`가 있는지 본다. GitHub에서만 켠다 |
+| `BASE_URL` | `run` | GitHub에서는 `https://api.grandis-nova.link`로 고정한다. 로컬 Forgejo에서만 저장소 변수 `vars.BASE_URL`을 쓴다 |
+| `SLACK_WEBHOOK_URL` | `run` | 결과를 보낼 웹훅. 없거나 보내지 못해도 시험 결과는 바뀌지 않는다 |
+| `LOADTEST_CLUSTER` | `stop`, `idle` | 시험 클러스터 이름(`nova-prod-loadtest`). 빌드 역할에는 SSM 권한이 없어서 직접 넘긴다 |
+| `K6_FAMILY` | `stop` | k6 작업 정의 이름(`nova-prod-loadtest-k6`). 이 이름의 태스크만 멈춘다 |
+| `CONTROLLER_INLINE`, `CONTROLLER_BIN` | `run`, `cleanup` | 로컬 Forgejo 전용. `1`이면 컨트롤러를 RunTask로 띄우지 않고 `CONTROLLER_BIN` 실행 파일을 바로 돌린다. GitHub에서 켜져 있으면 바로 실패한다 |
+
+- `run`, `cleanup`은 시작할 때 실행 위치를 확인한다. `GITHUB_SERVER_URL`이 `https://github.com`이 아니면 `AWS_ENDPOINT_URL`과 `AWS_ENDPOINT_URL_ECS`가 로컬 주소(compose 안의 이름, localhost, 사설 IP)여야 한다([구현 계획 7.4](implementation-plan.md#74-운영에-닿지-않게)).
+- `run`은 SSM 두 값을 읽은 직후 다른 무엇을 출력하기 전에 가릴 값마다 `::add-mask::`를 낸다. `after`도 SSM 값을 다시 읽으므로 같은 순서를 지킨다.
+- `run`은 결과(`summary.json`)가 합격이나 한계 측정이 아니면 실패로 끝난다. `summary.json`이 없으면 판정 불가로 실패한다.
+
 ### 워크플로가 컨트롤러에 넘기는 값(RunTask 덮어쓰기)
 
 | 환경 변수 | 내용 |

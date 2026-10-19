@@ -1,0 +1,154 @@
+package fakelocal
+
+import (
+	"encoding/json"
+	"math"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ecs"
+)
+
+// flowNames 는 흐름마다 반드시 보내는 요청 이름이다(controller/internal/control 의 flowName 과 같다)
+var flowNames = map[string]string{
+	"catalog":   "/api/v1/products",
+	"preorders": "/api/v1/preorders/active",
+	"entry":     "/api/v1/preorders/queue",
+	"order":     "/api/v1/orders",
+	"cancel":    "/api/v1/preorders/{id}/cancel",
+}
+
+var (
+	testIDRe = regexp.MustCompile(`test_id="([^"]+)"`)
+	rangeRe  = regexp.MustCompile(`\[(\d+)s\]`)
+)
+
+type sample struct {
+	Metric map[string]string `json:"metric"`
+	Value  [2]any            `json:"value"`
+}
+
+// serveMimir 는 컨트롤러가 보내는 쿼리(controller/internal/mimir)를 모양으로 알아보고 각본대로 답한다.
+// PromQL 을 계산하지 않는다. 쿼리 모양이 바뀌면 여기도 바꾼다.
+func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("query")
+	ts, _ := strconv.ParseInt(r.URL.Query().Get("time"), 10, 64)
+	at := time.Unix(ts, 0)
+	sc := s.current()
+
+	m := testIDRe.FindStringSubmatch(q)
+	if m == nil {
+		http.Error(w, "test_id 가 없는 쿼리", http.StatusBadRequest)
+		return
+	}
+	testID := m[1]
+	s.mu.Lock()
+	start, ok := s.starts[testID]
+	s.mu.Unlock()
+	p := s.plan(testID)
+	if !ok || p == nil {
+		writeVector(w, at, nil) // 아직 k6 를 띄우기 전이다
+		return
+	}
+	rel := at.Sub(start)
+	if sc.MimirDown != nil && sc.MimirDown(rel) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	relSec := int(rel.Seconds())
+	rng := 0
+	if rm := rangeRe.FindStringSubmatch(q); rm != nil {
+		rng, _ = strconv.Atoi(rm[1])
+	}
+	instance := s.Config.Metrics.InstanceLabel
+	one := func(v float64) []sample {
+		return []sample{{Metric: map[string]string{}, Value: [2]any{ts, fmtFloat(v)}}}
+	}
+
+	var out []sample
+	switch {
+	case strings.Contains(q, "time() - max by"):
+		// 태스크마다 마지막 표본이 몇 초 전인가. 시작 전이면 표본이 없다
+		for i := range p.Tasks {
+			if relSec < 10 {
+				continue
+			}
+			age := 5
+			if gap, since := sc.silentAt(i, relSec); gap {
+				age = since + 5
+			}
+			out = append(out, sample{Metric: map[string]string{instance: strconv.Itoa(i)}, Value: [2]any{ts, fmtFloat(float64(age))}})
+		}
+	case strings.Contains(q, "count_over_time"):
+		for i := range p.Tasks {
+			n := sc.samples(i, relSec-rng, relSec)
+			out = append(out, sample{Metric: map[string]string{instance: strconv.Itoa(i)}, Value: [2]any{ts, fmtFloat(float64(n))}})
+		}
+	case strings.Contains(q, "sum by (name)"):
+		window := -1
+		for wi, w := range p.Windows {
+			if w.End == relSec && w.End-w.Start == rng {
+				window = wi
+			}
+		}
+		for _, name := range names(p.Flows) {
+			v := 0.0
+			switch {
+			case strings.Contains(q, "_bucket"):
+				v = sc.within(name, window)
+			case strings.Contains(q, `status=~"5.."`):
+				v = 0
+			default:
+				v = float64(rng) * 5 // 초당 5건
+			}
+			out = append(out, sample{Metric: map[string]string{"name": name}, Value: [2]any{ts, fmtFloat(v)}})
+		}
+	case strings.Contains(q, `expected_response="false"`):
+		v := 0.001
+		if sc.ErrorRate != nil {
+			v = sc.ErrorRate(rel)
+		}
+		out = one(v)
+	case strings.Contains(q, `status=~"5.."`):
+		out = one(0)
+	default:
+		http.Error(w, "fake-mimir 가 모르는 쿼리: "+q, http.StatusBadRequest)
+		return
+	}
+	writeVector(w, at, out)
+}
+
+func names(flows []string) []string {
+	var out []string
+	for _, f := range flows {
+		if n, ok := flowNames[f]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func writeVector(w http.ResponseWriter, _ time.Time, out []sample) {
+	if out == nil {
+		out = []sample{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": out}})
+}
+
+func fmtFloat(v float64) string {
+	if math.IsNaN(v) {
+		return "NaN"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func listInput(cluster string) *ecs.ListTasksInput {
+	return &ecs.ListTasksInput{Cluster: aws.String(cluster)}
+}

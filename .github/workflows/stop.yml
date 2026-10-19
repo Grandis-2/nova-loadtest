@@ -31,6 +31,8 @@ jobs:
           cache: false
 
       - name: build
+        # 모듈 받기가 네트워크 문제로 멈추면 작업이 끝까지 기다리지 않게 한다
+        timeout-minutes: 10
         run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
 
       - name: stop

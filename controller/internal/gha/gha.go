@@ -87,16 +87,16 @@ func CheckTestID(id string) error {
 	return nil
 }
 
-// Inputs 는 워크플로 입력(INPUT_<이름> 환경 변수)을 계획 입력으로 바꾼다.
+// Inputs 는 워크플로 입력(LT_<이름> 환경 변수)을 계획 입력으로 바꾼다.
 func Inputs(getenv func(string) string) (plan.Input, error) {
 	in := plan.Input{
 		TestID:        getenv("TEST_ID"),
-		Scenario:      getenv("INPUT_SCENARIO"),
-		ProductID:     strings.TrimSpace(getenv("INPUT_PRODUCT_ID")),
-		PrepProductID: strings.TrimSpace(getenv("INPUT_PREP_PRODUCT_ID")),
-		OpenAt:        strings.TrimSpace(getenv("INPUT_OPEN_AT")),
-		Duration:      strings.TrimSpace(getenv("INPUT_DURATION")),
-		RampUp:        strings.TrimSpace(getenv("INPUT_RAMP_UP")),
+		Scenario:      getenv("LT_SCENARIO"),
+		ProductID:     strings.TrimSpace(getenv("LT_PRODUCT_ID")),
+		PrepProductID: strings.TrimSpace(getenv("LT_PREP_PRODUCT_ID")),
+		OpenAt:        strings.TrimSpace(getenv("LT_OPEN_AT")),
+		Duration:      strings.TrimSpace(getenv("LT_DURATION")),
+		RampUp:        strings.TrimSpace(getenv("LT_RAMP_UP")),
 	}
 	var errs []error
 	num := func(name string, set func(float64)) {
@@ -106,21 +106,21 @@ func Inputs(getenv func(string) string) (plan.Input, error) {
 		}
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s %q 는 숫자여야 한다", strings.ToLower(strings.TrimPrefix(name, "INPUT_")), v))
+			errs = append(errs, fmt.Errorf("%s %q 는 숫자여야 한다", strings.ToLower(strings.TrimPrefix(name, "LT_")), v))
 			return
 		}
 		set(f)
 	}
-	num("INPUT_PEAK_RPS", func(f float64) { in.PeakRPS = f })
-	num("INPUT_ABORT_ERROR_RATE", func(f float64) { in.AbortErrorRate = f })
-	if v := strings.TrimSpace(getenv("INPUT_RUNNERS")); v != "" {
+	num("LT_PEAK_RPS", func(f float64) { in.PeakRPS = f })
+	num("LT_ABORT_ERROR_RATE", func(f float64) { in.AbortErrorRate = f })
+	if v := strings.TrimSpace(getenv("LT_RUNNERS")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("runners %q 는 정수여야 한다", v))
 		}
 		in.Runners = n
 	}
-	if f := strings.TrimSpace(getenv("INPUT_FLOWS")); f != "" {
+	if f := strings.TrimSpace(getenv("LT_FLOWS")); f != "" {
 		for _, x := range strings.Split(f, ",") {
 			if x = strings.TrimSpace(x); x != "" {
 				in.Flows = append(in.Flows, x)

@@ -87,7 +87,7 @@ flowchart LR
 
 | 환경 변수 | 쓰는 명령 | 내용 |
 |---|---|---|
-| `INPUT_SCENARIO`, `INPUT_PRODUCT_ID`, `INPUT_PREP_PRODUCT_ID`, `INPUT_OPEN_AT`, `INPUT_PEAK_RPS`, `INPUT_DURATION`, `INPUT_RAMP_UP`, `INPUT_RUNNERS`, `INPUT_FLOWS`, `INPUT_ABORT_ERROR_RATE` | `plan`, `run` | `loadtest.yml`의 입력. 비우면 `scenarios.yml`의 기본값이다. `INPUT_FLOWS`는 쉼표로 구분한다. `INPUT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
+| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_ABORT_ERROR_RATE` | `plan`, `run` | `loadtest.yml`의 입력. 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
 | `TEST_ID` | `run`, `after`, `stop`, `cleanup` | 시험 ID. `run`, `after`는 `plan` 작업의 출력을 받고, `stop`, `cleanup`은 입력을 받아 형식을 검사한다 |
 | `PLANNED_AT` | `run` | `plan` 작업이 계획한 시각(RFC3339). `run`은 이 시각으로 계획을 다시 계산해 `INPUT_JSON`의 `planned_at`에 넣는다 |
 | `AWS_ROLE_ARN` | `plan`(이미지 확인), 나머지 모두 | 맡을 역할. GitHub 비밀 `AWS_BUILD_ROLE_ARN` 또는 `AWS_RUN_ROLE_ARN`에서 받는다. `ACTIONS_ID_TOKEN_REQUEST_URL`이 있을 때만 맡고, 세션이 끝나기 10분 전에 OIDC 토큰을 다시 받아 세션을 바꾼다 |

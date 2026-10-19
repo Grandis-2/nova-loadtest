@@ -8,7 +8,7 @@
 //	gha ecr-login build.yml: ECR 에 docker login 한다(비밀번호는 가린 뒤 표준 입력으로 넘긴다)
 //	gha idle      build.yml: 시험 클러스터에 도는 태스크가 없는지 본다(있으면 latest 를 옮기지 않는다)
 //
-// 입력은 환경 변수로 받는다(INPUT_<이름>, TEST_ID, PLANNED_AT, AWS_ROLE_ARN 등). docs/configuration.md 참고.
+// 입력은 환경 변수로 받는다(LT_<이름>, TEST_ID, PLANNED_AT, AWS_ROLE_ARN 등). docs/configuration.md 참고.
 package main
 
 import (

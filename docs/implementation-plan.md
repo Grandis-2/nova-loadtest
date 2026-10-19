@@ -44,8 +44,8 @@ nova-loadtest/
 │   ├── cmd/gha/                 러너에서 도는 명령: 계획, 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지, 정리, ECR 로그인
 │   ├── cmd/k6-runner/           k6 이미지의 시작 프로그램: 토큰 받기 → START_AT 대기 → k6 run → 요약 올리기
 │   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
-│   ├── cmd/fake-mimir/          로컬·CI 시험용. 정해 둔 각본(합격, 오류율 초과, 지표 끊김 등)대로 PromQL 에 답한다
-│   ├── cmd/fake-ecs/            로컬·CI 시험용. RunTask/ListTasks/DescribeTasks/StopTask 를 받아 각본대로 태스크 상태와 종료 코드를 바꾼다
+│   ├── cmd/fake-cluster/        로컬 시험용. 가짜 ECS(RunTask/ListTasks/DescribeTasks/StopTask)와 가짜 Mimir(PromQL)를 한 프로세스로 띄운다
+│   ├── cmd/scenarios/           로컬 3단계 각본 실행기: 각본 바꾸기 → dispatch → 개입(중지, 취소, 컨트롤러 종료) → 결과 확인
 │   ├── Dockerfile               컨트롤러 이미지(distroless)
 │   └── internal/
 │       ├── plan/                입력 + scenarios.yml → 계획(도착률, 대수, 회원, VU, 시간)
@@ -57,7 +57,8 @@ nova-loadtest/
 │       ├── awsio/               S3, SQS 를 control 의 인터페이스에 맞춤
 │       ├── gha/                 cmd/gha 의 로직: 실행 위치 확인, 입력, 값 가리기, 사전 점검, OIDC 세션 갱신, 결과 정리
 │       ├── clock/               시계(테스트는 가짜 시계로 시간을 바로 흘린다)
-│       └── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-ecs 서버가 같이 쓴다
+│       ├── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-cluster 가 같이 쓴다
+│       └── fakelocal/           fake-cluster 의 ECS JSON API, Mimir 응답, 각본 목록, moto 준비
 ├── token-minter/                토큰 발급기(Go, distroless)
 │   ├── Dockerfile
 │   ├── cmd/token-minter/        환경 변수를 읽어 토큰 파일을 S3 에 올린다
@@ -67,7 +68,8 @@ nova-loadtest/
 ├── tools/
 │   └── check-workflows/         워크플로 규칙 검사(Go, actionlint 파서). pull_request_target, continue-on-error, 해시로 고정하지 않은 uses 를 막는다
 ├── local/                       로컬 확인용(운영에 쓰지 않는다). 7절
-│   ├── compose.yml              Forgejo, 러너, dind, moto, fake-ecs, fake-mimir
+│   ├── compose.yml              Forgejo, 러너, dind, moto, fake-cluster, fake-api
+│   ├── fakes.Dockerfile         fake-cluster, fake-api 이미지
 │   ├── forgejo/                 up.sh(띄우기, 계정과 러너 등록), mirror.sh(작업 트리 올리기), runner.yml
 │   └── README.md                띄우는 법, 워크플로 수동 실행, 로컬 be 로 smoke 돌리는 법
 └── docs/
@@ -345,9 +347,9 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | forgejo | `codeberg.org/forgejo/forgejo:17.0.0` | 저장소와 Actions. `[actions] DEFAULT_ACTIONS_URL=https://github.com`으로 두어 `uses:`가 GitHub과 같은 액션을 받는다 |
 | runner | `code.forgejo.org/forgejo/runner:13.2.0` | 작업 실행. 13.2부터 실행 요약을 지원한다. 라벨 `ubuntu-latest`는 `node:24.19.0-bookworm`이다. 이 이미지는 `up.sh`가 호스트에서 받아 dind에 넣는다(dind가 레지스트리에 IPv6로만 붙으려다 실패하는 환경이 있다). Go 도구 캐시는 dind 볼륨에 남겨 실행마다 다시 받지 않는다 |
 | dind | `docker:29.7.2-dind` | 러너가 쓰는 Docker. 호스트의 Docker 소켓은 넘기지 않는다 |
-| moto | `motoserver/moto` (고정) | S3, ECR, SSM, SQS 흉내(SQS는 정리 각본의 큐). SSM의 두 경로에 인프라와 같은 형식의 가짜 JSON을 넣어 둔다(수집 주소는 compose 안의 가짜 수신기, Mimir는 fake-ecs가 돌려주는 가짜 obs 태스크 IP) |
-| fake-ecs | 이 저장소 `cmd/fake-ecs` | ECS 흉내. moto의 ECS는 태스크를 RUNNING으로 둘 뿐 끝내지 않고 종료 코드도 줄 수 없다. 그래서 "정해진 시각에 0으로 끝남", "태스크 2가 99로 끝남", "제때 RUNNING이 안 됨" 같은 각본을 직접 만든다. 관측 클러스터의 `ListTasks`/`DescribeTasks`에도 답해 fake-mimir의 IP를 돌려준다. SDK는 `AWS_ENDPOINT_URL_ECS`로 여기를 본다 |
-| fake-mimir | 이 저장소 `cmd/fake-mimir` | 각본대로 PromQL에 답한다. fake-ecs와 같은 각본 이름을 받아 시각을 맞춘다 |
+| moto | `motoserver/moto:5.2.3` | S3, SSM, SQS 흉내(SQS는 정리 각본의 큐). fake-cluster가 시작할 때와 각본을 바꿀 때 버킷, SSM 두 값(인프라와 같은 형식의 가짜 JSON), 큐를 만든다. 실행기가 결과를 읽도록 `127.0.0.1:5000`에 연다 |
+| fake-cluster | 이 저장소 `cmd/fake-cluster` | 가짜 ECS(`:8080`)와 가짜 Mimir(`:9009`)를 한 프로세스로 띄운다. 둘이 같은 각본과 같은 시험 계획(컨트롤러가 S3에 쓴 `plan.json`)을 봐야 시각이 맞기 때문이다. moto의 ECS는 태스크를 RUNNING으로 둘 뿐 끝내지 않고 종료 코드도 줄 수 없어서, "정해진 시각에 0으로 끝남", "태스크 2가 99로 끝남", "제때 RUNNING이 안 됨" 같은 각본을 직접 만든다. 관측 클러스터의 `ListTasks`/`DescribeTasks`에는 이 컨테이너의 IP를 관측 태스크 IP로 돌려준다. 가짜 Mimir는 PromQL을 계산하지 않고 컨트롤러 쿼리의 모양을 알아보고 각본대로 답한다. 각본 제어(`:8081`)는 `127.0.0.1`에만 연다 |
+| fake-api | 이 저장소 `cmd/fake-api` | 사전 점검이 부르는 공개 상품 API. `up.sh`가 저장소 변수 `BASE_URL`을 이 주소로 둔다 |
 
 - `local/forgejo/up.sh`가 관리자 계정과 러너를 등록하고, `mirror.sh`가 작업 트리를 로컬 Forgejo의 main으로 push 한다. 띄우는 법은 [local/README.md](../local/README.md)에 있다.
 - 확인한 것(2026-10-19, NV-656)
@@ -366,13 +368,13 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 |---|---|---|---|
 | 1. 단위 | `ci.yml`(GitHub, 로컬 Forgejo) | `cmd/plan` 계산(아래 "계획 계산 시험"), 발급기의 클레임 고정과 범위 거절, 컨트롤러 판정(가짜 ECS, 가짜 Mimir로 결과 다섯), k6 스크립트 `k6 inspect` | 아니요 |
 | 2. 이미지 | `ci.yml` k6-safety 작업 | 이미지 3개를 `linux/amd64`로 빌드. k6 이미지를 시험용 응답 서버(`services`)에 붙여 돌린다: User-Agent, `responseCallback`, 오류를 내면 99, SIGTERM에 105와 요약 업로드(moto S3) | 아니요 |
-| 3. 워크플로 | 로컬 Forgejo 수동 실행 | `loadtest.yml`, `stop.yml`, `cleanup.yml`을 moto, fake-ecs, fake-mimir에 붙여 각본별로 돌린다(아래 표) | 아니요 |
+| 3. 워크플로 | 로컬 Forgejo | `loadtest.yml`, `stop.yml`, `cleanup.yml`을 moto, fake-cluster에 붙여 각본별로 돌린다(아래 표, `go run ./controller/cmd/scenarios`) | 아니요 |
 | 4. 흐름 | 로컬 be | k6 흐름 다섯 개를 로컬 be와 시험용 키로 돌린다(A-3, A-4) | 아니요 |
 | 5. 운영 | GitHub | 상품 조회 smoke → 전체 smoke(C-2, C-4). 7.3을 여기서 확인한다 | 예, 승인 뒤 |
 
 **3단계 각본**(시험 시간은 모두 2~3분짜리 계획으로 줄여 돌린다)
 
-| 각본 | fake-ecs | fake-mimir | 기대 |
+| 각본 | 가짜 ECS | 가짜 Mimir | 기대 |
 |---|---|---|---|
 | 합격 | 모두 끝 시각에 0 | 정상 | 워크플로 성공. 실행 요약에 계획 표, 전체·흐름별 결과 |
 | 불합격 | 모두 끝 시각에 0 | 결제 흐름의 0.5초 안 비율 90% | 워크플로 실패, 결과 "불합격", 흐름별 표에 결제가 걸린다 |
@@ -384,7 +386,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 판정 불가(구간 누락) | 모두 끝 시각에 0 | 태스크 0의 지표가 중간 2분 비어 있음(감시 중에는 보이지 않게 1분 미만씩) | "판정 불가", 수치를 내지 않는다 |
 | 시작 취소 | 태스크 3이 `START_AT`까지 PROVISIONING | 없음 | 띄운 태스크를 모두 멈추고 실패. Mimir를 조회하지 않는다 |
 | 발급기 실패 | 발급기 태스크가 1로 끝남 | 없음 | k6 RunTask가 한 번도 불리지 않고 실패 |
-| 관측 값 틀림 | 없음 | 없음 | moto의 `observability`에서 `otlpEndpoint`를 빼거나 `http://`를 붙인다. 컨트롤러가 입력 검사에서 실패하고 fake-ecs에 k6 RunTask가 오지 않는다 |
+| 관측 값 틀림 | 없음 | 없음 | moto의 `observability`에서 `otlpEndpoint`를 빼거나 `http://`를 붙인다. `cmd/gha run`이 컨트롤러를 띄우기 전에 입력 검사에서 실패하고, RunTask가 하나도 오지 않는다 |
 | 이미지 섞임 | 태스크 1의 `imageDigest`가 다름 | 없음 | 시작 시각 전에 모든 태스크를 멈추고 실패. 결과에 다이제스트 두 개가 적힌다 |
 | 수집 주소 덮어쓰기 | 받은 RunTask를 기록 | 정상 | 모든 k6 RunTask의 덮어쓰기에 `K6_OTEL_HTTP_EXPORTER_ENDPOINT=<host:port>`와 태스크마다 다른 `OTEL_RESOURCE_ATTRIBUTES`가 있다. 작업 정의 고정값(전송 방식 등)은 덮어쓰기에 없다. 실행 로그에 버킷 이름, 서브넷, 보안 그룹 ID가 찍히지 않았다 |
 | obs 재배포 | 관측 서비스 태스크가 둘(`startedAt` 다름), 도중에 이전 것이 사라짐 | 늦게 시작한 IP에서만 정상 | 늦게 시작한 태스크를 고르고, 판정대로 "합격" |
@@ -392,12 +394,14 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 정리 거절 | 다른 시험 ID의 k6가 RUNNING | 없음 | `tasks.data`가 없을 때, 끝나지 않은 시험 ID 일 때, 다른 시험이 돌 때 데이터 태스크를 띄우지 않고 실패한다 |
 | 컨트롤러 사망 | 컨트롤러가 도중에 137 | 정상 | `summary.json`이 없어 "판정 불가". 뒷정리가 남은 k6 태스크를 멈춘다 |
 | 수동 중지 | RUNNING | 정상 | 도중에 `stop.yml`을 돌리면 k6만 멈추고 컨트롤러가 "중단" 결과를 쓴다 |
-| 취소 | RUNNING | 정상 | 도중에 워크플로를 취소해도 뒷정리(`if: always()`)가 돌아 `ListTasks(startedBy)`가 빈다 |
+| 취소 | RUNNING | 정상 | 도중에 워크플로를 취소해도 뒷정리(`if: always()`)가 돌아 `ListTasks(startedBy)`가 빈다. Forgejo에서는 뒷정리가 돌지 않아 GitHub에서 확인한다(7.3) |
 | stress 한계 | 끝 시각에 0 | 단계 3부터 0.5초 안 비율 미달 | 워크플로 성공, "한계 측정", 마지막 합격 단계 2 |
-| 입력 거절 | 없음 | 없음 | 아래 "계획 계산 시험"의 거절 경우마다 `plan` 작업이 실패하고 fake-ecs에 요청이 한 번도 오지 않는다 |
+| 입력 거절 | 없음 | 없음 | 아래 "계획 계산 시험"의 거절 경우마다 `plan` 작업이 실패하고 가짜 ECS에 요청이 한 번도 오지 않는다 |
 
-- moto와 fake-ecs는 컨테이너를 띄우지 않으므로 컨트롤러도 뜨지 않는다. 로컬에서는 `run` 작업이 컨트롤러 실행 파일을 작업 컨테이너 안에서 바로 돌린다(`CONTROLLER_INLINE=1`). 컨트롤러 사망 각본은 `cmd/gha`가 각본 시각에 인라인 컨트롤러 프로세스를 SIGKILL로 끝내 흉내 낸다.
-- fake-ecs는 실제 ECS와 다르게 동작할 수 있다. RunTask 10대 제한, `startedBy` 거르기, StopTask 뒤 STOPPED까지 걸리는 시간은 실제 동작을 문서로 확인해 넣고, 실제 ECS와 맞는지는 C-4에서 다시 본다.
+- 가짜 ECS는 컨테이너를 띄우지 않으므로 컨트롤러도 뜨지 않는다. 로컬에서는 `run` 작업이 컨트롤러를 작업 안에서 빌드해 바로 돌린다(`CONTROLLER_INLINE=1`, `CONTROLLER_BIN`). 컨트롤러 사망 각본은 실행기가 k6 태스크가 뜬 뒤 작업 컨테이너 안의 컨트롤러 프로세스를 SIGKILL로 끝낸다(dind 의 `docker exec`).
+- 실행기(`controller/cmd/scenarios`)의 각본 이름은 `pass`, `fail`, `abort-error-rate`, `abort-task-99`, `end-99`, `inconclusive-silent`, `inconclusive-mimir`, `inconclusive-gap`, `start-cancel`, `minter-fail`, `bad-observability`, `image-mix`, `obs-redeploy`, `manual-stop`, `cancel`, `controller-dies`, `cleanup`(큐가 빌 때까지 기다리는 경우 포함), `cleanup-refused`, `cleanup-other-test`(끝나지 않은 시험, 다른 시험이 돌 때), `input-rejected`, `stress-limit`(`-long`, 30분 넘게 걸린다)이다. 수집 주소 덮어쓰기와 실행 로그 가리기는 `pass` 각본에서 확인한다. 정리 각본은 끝난 spike 시험의 `plan.json`, `summary.json`을 moto에 만들어 두고 돈다. 큐에 메시지가 남은 각본은 30분을 기다리지 않고, 90초 뒤 큐를 비워 기다렸다가 정리하는지만 본다.
+- 확인한 것(2026-10-19): `cancel`과 `stress-limit`을 뺀 각본이 모두 기대한 결과로 끝났다. 각본 하나에 3~10분 걸린다. 돌리는 동안 노트북이 절전에 들어가면 작업이 모듈을 받다가 멈추므로 `systemd-inhibit`로 감싸 돌린다.
+- 가짜 ECS는 실제 ECS와 다르게 동작할 수 있다. RunTask 10대 제한, `startedBy` 거르기, StopTask 뒤 STOPPED까지 걸리는 시간은 실제 동작을 문서로 확인해 넣고, 실제 ECS와 맞는지는 C-4에서 다시 본다.
 
 **4단계 흐름 시험**(로컬 be, 시험용 키쌍. 운영 키는 쓰지 않는다)
 
@@ -440,6 +444,8 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | environment 승인 | 승인자 지정 가능 | 같은 기능을 확인하지 못했다 | 로컬에서는 승인 없이 돈다. "승인이 한 번만 걸린다"는 C-4에서 확인한다 |
 | OIDC | `permissions: id-token: write`, `sub`에 `environment:loadtest` | `enable-openid-connect: true`, `sub`는 `ref:` 또는 `pull_request` 형식뿐이고 Forgejo 16부터 저장소가 숫자 ID 일 수 있다 | 로컬은 OIDC를 쓰지 않고 moto용 가짜 자격 증명을 넣는다. 신뢰 조건은 B-2와 C-4에서 확인한다 |
 | `permissions`, `continue-on-error` | 동작 | 무시 | `continue-on-error`는 쓰지 않는다. 실패 처리는 `if:`로만 한다 |
+| `INPUT_` 환경 변수 | 보통의 환경 변수 | 러너(act)가 액션 입력으로 따로 다뤄 `env:`의 `${{ }}`가 풀리지 않고 글자 그대로 남는다 | 워크플로 입력은 `LT_<이름>`으로 넘긴다 |
+| 실행 취소 | 취소해도 `if: always()` 단계가 돈다 | 러너가 작업을 바로 끊어 `if: always()` 단계가 돌지 않는다(2026-10-19 확인, 러너 13.2) | 취소 뒤 뒷정리는 C-4에서 GitHub으로 확인한다. 로컬 `cancel` 각본은 이름을 줄 때만 돈다 |
 | 실행 요약 | `$GITHUB_STEP_SUMMARY` | Forgejo 17 + 러너 13.2부터 같은 변수 지원 | `$GITHUB_STEP_SUMMARY`만 쓴다 |
 | 기본 이미지 | ubuntu, 도구가 많다 | Debian + node.js 정도 | `jq`, AWS CLI 같은 기본 도구에 기대지 않는다. Go는 `setup-go`로 깔고, 계산과 AWS 호출은 Go 명령(`cmd/plan`, 컨트롤러)으로 한다 |
 | CODEOWNERS, 브랜치 보호, environment | 동작 | 이 저장소 설정과 무관 | A-1a에서 GitHub에 설정한다(B-2 전) |
@@ -448,7 +454,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 
 ### 7.4 운영에 닿지 않게
 
-- 워크플로의 첫 단계가 어디서 도는지 확인한다. `github.server_url`이 `https://github.com`이 아니면 `AWS_ENDPOINT_URL`(moto)과 `AWS_ENDPOINT_URL_ECS`(fake-ecs)가 로컬 주소여야 하고, 아니면 바로 실패한다.
+- 워크플로의 첫 단계가 어디서 도는지 확인한다. `github.server_url`이 `https://github.com`이 아니면 `AWS_ENDPOINT_URL`(moto)과 `AWS_ENDPOINT_URL_ECS`(fake-cluster)가 로컬 주소(풀었을 때 사설 IP나 루프백)여야 하고, 아니면 바로 실패한다.
 - `CONTROLLER_INLINE=1`은 GitHub이 아닐 때만 받아들인다. GitHub에서 켜져 있으면 바로 실패한다.
 - 로컬 러너와 dind에는 `~/.aws`를 넣지 않는다. 컨트롤러와 `k6-runner`도 `AWS_ENDPOINT_URL`을 그대로 따른다.
 - 로컬 be로 돌리는 4단계에서 `BASE_URL`이 `api.grandis-nova.link`이면 `k6-runner`가 시작하지 않는다(`LOCAL=1` 일 때).

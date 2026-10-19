@@ -1,0 +1,6 @@
+# 토큰 발급기, 설정, 워크플로는 담당자 리뷰를 받는다(구현 계획 1절)
+/token-minter/       @UHeeJoon
+/config/             @UHeeJoon
+/.github/workflows/  @UHeeJoon
+/tools/check-workflows/  @UHeeJoon
+/.github/CODEOWNERS  @UHeeJoon

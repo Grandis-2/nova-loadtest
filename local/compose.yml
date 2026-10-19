@@ -1,0 +1,73 @@
+# 로컬 확인용 Forgejo 와 러너. 운영에 쓰지 않는다(구현 계획 7절).
+# 띄우는 법은 local/README.md. moto, fake-ecs, fake-mimir 는 컨트롤러와 함께 더한다.
+name: nova-loadtest-local
+
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:17.0.0
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__security__INSTALL_LOCK: "true"
+      # 작업 컨테이너가 이 주소로 checkout 한다
+      FORGEJO__server__ROOT_URL: http://forgejo:3000/
+      FORGEJO__server__DISABLE_SSH: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__repository__ENABLE_PUSH_CREATE_USER: "true"
+      FORGEJO__actions__ENABLED: "true"
+      # uses: 가 GitHub 과 같은 액션을 받는다
+      FORGEJO__actions__DEFAULT_ACTIONS_URL: https://github.com
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - forgejo-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/healthz"]
+      interval: 3s
+      retries: 40
+
+  # 러너가 쓰는 Docker. 호스트의 Docker 소켓은 넘기지 않는다
+  dind:
+    image: docker:29.7.2-dind
+    privileged: true
+    command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - dind-data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "-H", "tcp://127.0.0.1:2375", "info"]
+      interval: 2s
+      retries: 30
+
+  runner:
+    image: code.forgejo.org/forgejo/runner:13.2.0
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      dind:
+        condition: service_healthy
+    user: "0:0"
+    environment:
+      DOCKER_HOST: tcp://dind:2375
+    # RUNNER_TOKEN. forgejo/up.sh 가 Forgejo 에서 받아 둔다
+    env_file:
+      - path: .data/runner.env
+        required: false
+    working_dir: /data
+    volumes:
+      - runner-data:/data
+      - ./forgejo/runner.yml:/config/runner.yml:ro
+    command:
+      - sh
+      - -ec
+      - |
+        [ -f .runner ] || forgejo-runner register --no-interactive \
+          --instance http://forgejo:3000 --name local --token "$$RUNNER_TOKEN"
+        exec forgejo-runner --config /config/runner.yml daemon
+
+volumes:
+  forgejo-data:
+  dind-data:
+  runner-data:

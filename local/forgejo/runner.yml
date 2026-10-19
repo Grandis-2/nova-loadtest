@@ -1,0 +1,25 @@
+# forgejo-runner 설정. 작업 컨테이너는 dind 안에서 뜬다.
+log:
+  level: info
+
+runner:
+  file: .runner
+  capacity: 1
+  timeout: 1h
+  # 기본 이미지는 Debian + node 정도다. jq, AWS CLI 같은 도구에 기대지 않는다(구현 계획 7.3)
+  labels:
+    - "ubuntu-latest:docker://node:24.19.0-bookworm"
+
+cache:
+  enabled: false
+
+container:
+  # dind 의 네트워크를 같이 써서 작업이 compose 안의 forgejo 에 닿는다
+  network: host
+  privileged: false
+  # 작업 컨테이너에 Docker 소켓을 넣지 않는다
+  docker_host: "-"
+  # setup-go 가 받은 Go 를 dind 의 볼륨에 남겨, 다음 실행부터는 다시 받지 않는다
+  options: -v nova-loadtest-toolcache:/opt/hostedtoolcache
+  valid_volumes:
+    - nova-loadtest-toolcache

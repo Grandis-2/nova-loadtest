@@ -23,23 +23,27 @@ nova-loadtest/
 │   └── config.go                scenarios.yml 을 실행 파일에 넣고(go:embed) 읽고 검사한다
 ├── k6/
 │   ├── Dockerfile               linux/amd64. grafana/k6:2.3.0 의 k6 실행 파일 + k6-runner (distroless)
-│   ├── main.js                  PLAN_JSON 을 읽어 시나리오(흐름별 실행기)를 만든다
+│   ├── main.js                  PLAN_JSON 을 읽어 시나리오(흐름별 실행기)를 만든다. setup 에서 접수할 옵션을 고른다
+│   ├── test/e2e.sh              k6 이미지를 fake-api 와 moto 에 붙여 끝까지 돌린다(ok, error, sigterm). CI k6-safety 가 쓴다
 │   └── lib/
 │       ├── config.js            환경 변수 읽기와 검사
-│       ├── http.js              요청 함수(경로 템플릿 필수), 공통 헤더, 응답 봉투(ApiResponse) 해석
+│       ├── http.js              요청 함수(경로 템플릿 필수), 공통 헤더, 응답 봉투(ApiResponse) 해석, error_code 카운터
 │       ├── users.js             SharedArray 토큰, 풀 A/B/C 에서 회원 고르기
+│       ├── fake.js              한글 가짜 데이터(배송지, 취소 사유). 회원 번호를 시드로 쓴다
 │       └── flows/
 │           ├── entry.js         진입 → 순번 확인 → 입장권 → 접수
+│           ├── entry_flows.js   본 시험의 진입(풀 A)과 준비 구간(풀 B, C)
 │           ├── preorders.js     내 예약 조회
-│           ├── prepare.js       준비 구간: 풀 B, C 의 진입과 접수
 │           ├── cancel.js        예약 취소(풀 C)
 │           ├── order.js         주문 생성 → 결제 시도
-│           └── catalog.js       상품 조회
+│           ├── catalog.js       상품 조회
+│           └── skip.js          요청 없이 넘어간 반복(skipped) 카운터
 ├── controller/                  컨트롤러(Go)
 │   ├── cmd/controller/          태스크 진입점
 │   ├── cmd/plan/                입력 확인. 러너도 이 명령으로 계획을 계산한다
 │   ├── cmd/gha/                 러너에서 도는 명령: 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지
 │   ├── cmd/k6-runner/           k6 이미지의 시작 프로그램: 토큰 받기 → START_AT 대기 → k6 run → 요약 올리기
+│   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
 │   ├── cmd/fake-mimir/          로컬·CI 시험용. 정해 둔 각본(합격, 오류율 초과, 지표 끊김 등)대로 PromQL 에 답한다
 │   ├── cmd/fake-ecs/            로컬·CI 시험용. RunTask/ListTasks/DescribeTasks/StopTask 를 받아 각본대로 태스크 상태와 종료 코드를 바꾼다
 │   └── internal/
@@ -96,7 +100,8 @@ nova-loadtest/
 | `SEGMENT`, `SEGMENT_SEQUENCE` | `i/N:(i+1)/N`, `0,1/N,…,1` |
 | `PLAN_JSON` | 흐름별 도착률, 단계, VU 수 |
 | `PRODUCT_ID`, `PREP_PRODUCT_ID` | 진입 상품, 준비 구간 상품. 옵션 ID는 `setup()`에서 상품 상세로 읽는다 |
-| `TOKENS_URI` | 토큰 위치(`s3://<버킷>/tokens/<test_id>/`). `k6-runner`가 여기서 받아 로컬 파일로 두고, k6는 로컬 파일만 읽는다 |
+| `TOKENS_URI` | 토큰 위치(`s3://<버킷>/tokens/<test_id>/`). `k6-runner`가 여기서 받아 로컬 파일로 두고, k6는 로컬 파일만 읽는다. 상품 조회만 하는 시험에는 넘기지 않는다 |
+| `RESULTS_URI` | 결과 위치(`s3://<버킷>/results/<test_id>/`). `k6-runner`가 `k6-<i>.json`을 여기에 올린다 |
 | `BASE_URL` | `https://api.grandis-nova.link` |
 | `LOADTEST_HEADER` | 부하 시험 헤더 값(작업 정의 `secrets`). 시나리오와 관계없이 늘 붙인다. 첫 smoke는 WAF 예외(I-5)를 적용하기 전에 돌므로, 헤더가 있어도 요청 제한을 받는다는 전제로 계획한다 |
 | `OTEL_RESOURCE_ATTRIBUTES` | `service.instance.id=<i>,service.namespace=loadtest` |
@@ -115,7 +120,7 @@ nova-loadtest/
 - `options.userAgent = 'nova-loadtest/' + TEST_ID`로 둔다. `lib/http.js`의 공통 헤더에 `User-Agent`를 넣지 않는다(넣으면 옵션을 덮는다).
 - `handleSummary`는 JSON 요약 하나만 파일로 쓴다. `setup()`은 토큰이나 헤더 값을 반환하지 않는다(요약에 들어간다).
 - `discardResponseBodies: true`로 두고, 본문이 필요한 요청만 `responseType: 'text'`로 받는다.
-- 진입 흐름은 202이면 `Retry-After` 초만큼 `sleep` 한 뒤 다시 확인한다. 서버가 주는 간격을 그대로 따른다(늦으면 서버가 이탈자로 보고 줄에서 뺀다). 진입부터 접수 응답까지 걸린 시간을 `entry_to_accept` Trend로 남긴다. `new Trend('entry_to_accept', true)`로 만들어 단위를 ms로 맞춘다.
+- 진입 흐름은 202이면 `Retry-After` 초만큼 `sleep` 한 뒤 다시 확인한다. 확인 응답에 새 `queueToken`이 오면 그 값으로 바꾼다(만료가 가까울 때 서버가 바꿔 준다). 서버가 주는 간격을 그대로 따른다(늦으면 서버가 이탈자로 보고 줄에서 뺀다). 진입부터 접수 응답까지 걸린 시간을 `entry_to_accept` Trend로 남긴다. `new Trend('entry_to_accept', true)`로 만들어 단위를 ms로 맞춘다.
 - 진입 시나리오의 `gracefulStop`은 3분이다. 줄에 서 있던 회원이 시험 끝에 잘리지 않게 한다.
 - spike의 몰림 시나리오는 `open_at` + 1초에 시작한다(`startTime`을 컨트롤러가 계산해 `PLAN_JSON`에 넣는다).
 - 결제와 취소 흐름은 `GET /api/v1/preorders?productId=<PREP_PRODUCT_ID>`(결제는 `&status=REGISTERED`)로 예약을 찾는다. `/active`는 상품 필터가 없어 지난 시험의 예약이 섞인다. `CLOSED/NOT_IN_QUEUE`이면 한 번 다시 진입하고, `SALE_CLOSED`이면 끝낸다.

@@ -83,7 +83,7 @@ flowchart LR
 
 ### 컨트롤러가 k6에 넘기는 값(RunTask 덮어쓰기)
 
-`TEST_ID`, `TASK_INDEX`, `START_AT`, `SEGMENT`, `SEGMENT_SEQUENCE`, `PLAN_JSON`, `PRODUCT_ID`, `PREP_PRODUCT_ID`, `TOKENS_URI`, `BASE_URL`, `OTEL_RESOURCE_ATTRIBUTES`, `K6_OTEL_HTTP_EXPORTER_ENDPOINT`. 뜻은 [구현 계획 2.2](implementation-plan.md#22-k6-k6)에 있다.
+`TEST_ID`, `TASK_INDEX`, `START_AT`, `SEGMENT`, `SEGMENT_SEQUENCE`, `PLAN_JSON`, `PRODUCT_ID`, `PREP_PRODUCT_ID`, `TOKENS_URI`, `RESULTS_URI`, `BASE_URL`, `OTEL_RESOURCE_ATTRIBUTES`, `K6_OTEL_HTTP_EXPORTER_ENDPOINT`. 뜻은 [구현 계획 2.2](implementation-plan.md#22-k6-k6)에 있다.
 
 ### 컨트롤러가 토큰 발급기에 넘기는 값(RunTask 덮어쓰기)
 

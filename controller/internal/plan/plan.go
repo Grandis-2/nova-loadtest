@@ -71,6 +71,8 @@ type K6Scenario struct {
 	PreAllocatedVUs int     `json:"preAllocatedVUs"`
 	MaxVUs          int     `json:"maxVUs"`
 	GracefulStop    string  `json:"gracefulStop,omitempty"`
+	// Env는 k6 시나리오의 env다. 풀 A를 여러 시나리오가 나눠 쓸 때 POOL_FROM, POOL_TO(0~1 비율)로 구간을 준다
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // Window는 판정 구간이다. 초는 START_AT 기준이다.
@@ -438,7 +440,13 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			entryIter := cfg.Flows["entry"].IterationSeconds
 			// 몰림의 회원은 입장할 때까지 VU를 하나씩 잡는다
 			addConstant("entry_burst", "entry", peak, ms+1, burstS, peak*float64(burstS))
+			// 몰림과 관찰이 풀 A를 앞뒤로 나눠 쓴다. 회원 한 명은 시험 하나에서 한 번만 진입한다
+			split := fmt.Sprintf("%.6f", peak*float64(burstS)/entryTotal)
+			scenarios[len(scenarios)-1].Env = map[string]string{"POOL_FROM": "0", "POOL_TO": split}
 			addConstant("entry_observe", "entry", observeRPS, ms+1+burstS, observeS, observeRPS*entryIter)
+			if observeRPS > 0 && observeS > 0 {
+				scenarios[len(scenarios)-1].Env = map[string]string{"POOL_FROM": split, "POOL_TO": "1"}
+			}
 			windows = append(windows, Window{"spike", ms, ms + mainLen})
 		}
 	}

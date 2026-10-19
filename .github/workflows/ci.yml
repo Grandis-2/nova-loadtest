@@ -71,13 +71,22 @@ jobs:
           go vet ./...
           go test ./...
 
+      # 요청은 k6/lib/http.js 의 req() 로만 보낸다. 경로 템플릿을 name 태그로 넣어 시계열을 지키려는 것이다
+      - name: k6 요청 규칙
+        run: |
+          bad=$(grep -rln "k6/http" k6 --include='*.js' | grep -v '^k6/lib/http.js$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::k6/http 는 k6/lib/http.js 에서만 쓴다: $bad"
+            exit 1
+          fi
+
   # 이미지를 linux/amd64 로 빌드만 한다(올리지 않는다). 로컬 Forgejo 러너에는 Docker 소켓을 주지 않으므로 GitHub 에서만 돈다
   image-build:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        image: [token-minter]
+        image: [token-minter, k6]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,3 +96,57 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
         run: docker buildx build --platform linux/amd64 -f "$IMAGE/Dockerfile" -t "nova-loadtest/$IMAGE:ci" .
+
+  # k6 스크립트를 계획 다섯 가지로 해석해 본다(k6 inspect)
+  k6-inspect:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: inspect
+        run: |
+          go build -o "$RUNNER_TEMP/plan" ./controller/cmd/plan
+          p=a1b2c3d4-0000-4000-8000-000000000001
+          q=a1b2c3d4-0000-4000-8000-000000000002
+          for s in smoke load spike stress soak; do
+            "$RUNNER_TEMP/plan" -test-id lt-20261020t0630-1 -scenario "$s" -product-id "$p" -prep-product-id "$q" \
+              -open-at 2099-01-01T00:00:00Z -json "$RUNNER_TEMP/plan-$s.json"
+            docker run --rm -v "$PWD/k6:/k6:ro" -e TEST_ID=lt-20261020t0630-1 -e BASE_URL=http://127.0.0.1:9 \
+              -e PLAN_JSON="$(cat "$RUNNER_TEMP/plan-$s.json")" \
+              grafana/k6:2.3.0 inspect --include-system-env-vars /k6/main.js > /dev/null
+            echo "$s 통과"
+          done
+
+  # k6 이미지를 시험용 응답 서버와 moto 에 붙여 끝까지 돌린다(구현 계획 7.2 의 2단계)
+  k6-safety:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ok, error, sigterm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: k6 이미지
+        run: docker buildx build --platform linux/amd64 -f k6/Dockerfile -t nova-loadtest/k6:dev --load .
+
+      - name: e2e
+        env:
+          MODE: ${{ matrix.mode }}
+        run: k6/test/e2e.sh "$MODE"

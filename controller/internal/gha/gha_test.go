@@ -550,3 +550,32 @@ func TestRunLogsTaskIDOnly(t *testing.T) {
 		t.Fatalf("실행 로그에 태스크 ARN 이 있다:\n%s", f.out.String())
 	}
 }
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+// 역할을 맡기 전에 역할 ARN 의 계정 ID 부터 가린다. 가리기 명령을 쓰지 못하면 실패한다
+func TestMaskBeforeAssume(t *testing.T) {
+	var out bytes.Buffer
+	if err := maskARNAccount(&out, "arn:aws:iam::123456789012:role/nova-prod-loadtest-github-run"); err != nil || out.String() != "::add-mask::123456789012\n" {
+		t.Fatalf("%q %v", out.String(), err)
+	}
+	out.Reset()
+	if err := maskARNAccount(&out, ""); err != nil || out.Len() != 0 {
+		t.Fatalf("역할 ARN 이 없으면(로컬) 아무것도 하지 않는다: %q %v", out.String(), err)
+	}
+	if err := maskARNAccount(failWriter{}, "arn:aws:iam::123456789012:role/x"); err == nil {
+		t.Fatal("가리기 명령을 쓰지 못하면 실패해야 한다")
+	}
+	if err := MaskAccount(context.Background(), fakeSTS{account: "123456789012"}, failWriter{}, true); err == nil {
+		t.Fatal("가리기 명령을 쓰지 못하면 실패해야 한다")
+	}
+}
+
+func TestRedact(t *testing.T) {
+	got := Redact("AccessDenied: arn:aws:sts::123456789012:assumed-role/x is not authorized (요청 1234)")
+	if strings.Contains(got, "123456789012") || !strings.Contains(got, "요청 1234") {
+		t.Fatal(got)
+	}
+}

@@ -44,8 +44,9 @@ func main() {
 	}
 }
 
+// fail 은 오류를 찍고 끝낸다. 계정 ID 를 가리기 전에 난 오류일 수 있어 12자리 숫자를 지운다
 func fail(err error) {
-	fmt.Printf("::error::%v\n", err)
+	fmt.Printf("::error::%s\n", gha.Redact(err.Error()))
 	os.Exit(1)
 }
 

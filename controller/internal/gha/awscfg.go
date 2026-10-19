@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -70,12 +72,37 @@ func credentialSource(server, roleARN, reqURL string) error {
 //
 // 설정을 만든 뒤 계정 ID 를 가린다(MaskAccount). 공개 저장소의 실행 로그에 계정 ID 가 남지 않게 한다.
 func AWSConfig(ctx context.Context, out io.Writer, roleARN, sessionName string) (aws.Config, error) {
+	// 역할을 맡다가 난 오류에도 계정 ID 가 들어 있을 수 있다. 역할 ARN 에서 계정 ID 를 꺼내 먼저 가린다
+	if err := maskARNAccount(out, roleARN); err != nil {
+		return aws.Config{}, err
+	}
 	cfg, err := awsConfig(ctx, roleARN, sessionName)
 	if err != nil {
 		return cfg, err
 	}
 	return cfg, MaskAccount(ctx, sts.NewFromConfig(cfg), out, os.Getenv("GITHUB_SERVER_URL") == githubURL)
 }
+
+var accountRe = regexp.MustCompile(`\b\d{12}\b`)
+
+// maskARNAccount 는 ARN(arn:aws:iam::<계정>:role/...)의 계정 ID 를 가린다. ARN 이 아니면 아무것도 하지 않는다
+func maskARNAccount(out io.Writer, arn string) error {
+	parts := strings.Split(arn, ":")
+	if len(parts) < 6 || !accountRe.MatchString(parts[4]) {
+		return nil
+	}
+	return mask(out, parts[4])
+}
+
+func mask(out io.Writer, v string) error {
+	if _, err := fmt.Fprintf(out, "::add-mask::%s\n", v); err != nil {
+		return fmt.Errorf("로그 가리기 명령을 쓰지 못했다: %w", err)
+	}
+	return nil
+}
+
+// Redact 는 오류 메시지의 12자리 숫자(계정 ID)를 *** 로 바꾼다. 가리기 전에 난 오류를 찍을 때 쓴다
+func Redact(s string) string { return accountRe.ReplaceAllString(s, "***") }
 
 func awsConfig(ctx context.Context, roleARN, sessionName string) (aws.Config, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
@@ -114,10 +141,9 @@ func MaskAccount(ctx context.Context, c STS, out io.Writer, required bool) error
 	id, err := c.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil || aws.ToString(id.Account) == "" {
 		if required {
-			return fmt.Errorf("계정 ID 를 알아내지 못해 로그에서 가릴 수 없다: %v", err)
+			return fmt.Errorf("계정 ID 를 알아내지 못해 로그에서 가릴 수 없다: %s", Redact(fmt.Sprint(err)))
 		}
 		return nil // 로컬(moto)
 	}
-	fmt.Fprintf(out, "::add-mask::%s\n", aws.ToString(id.Account))
-	return nil
+	return mask(out, aws.ToString(id.Account))
 }

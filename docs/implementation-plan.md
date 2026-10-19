@@ -3,7 +3,7 @@
 어디에 무엇을 만드는지와 작업 단위를 적는다. 무엇을 왜 하는지는 [PLAN.md](../PLAN.md), 규칙과 근거는 [design.md](design.md)에 있다.
 
 - 전제: 시험용 인프라는 아직 없다. 인프라 없이 할 수 있는 것을 먼저 하고, nova-infra PR이 적용되면 이어 붙인다.
-- 기준: be는 main(`e6c43718`, 2026-10-17), nova-infra는 main을 보고 썼다.
+- 기준: be는 main(`4d5863cb`, 2026-10-19)의 컨트롤러와 DTO 코드, nova-infra는 main의 시험 스택(`terraform/aws/loadtest`)을 보고 맞췄다. be의 `contracts/` 문서는 기준으로 쓰지 않는다.
 
 ## 1. 저장소 구성
 

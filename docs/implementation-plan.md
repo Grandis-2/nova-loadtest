@@ -41,7 +41,7 @@ nova-loadtest/
 ├── controller/                  컨트롤러(Go)
 │   ├── cmd/controller/          태스크 진입점
 │   ├── cmd/plan/                입력 확인. 러너도 이 명령으로 계획을 계산한다
-│   ├── cmd/gha/                 러너에서 도는 명령: 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지
+│   ├── cmd/gha/                 러너에서 도는 명령: 계획, 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지, 정리, ECR 로그인
 │   ├── cmd/k6-runner/           k6 이미지의 시작 프로그램: 토큰 받기 → START_AT 대기 → k6 run → 요약 올리기
 │   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
 │   ├── cmd/fake-mimir/          로컬·CI 시험용. 정해 둔 각본(합격, 오류율 초과, 지표 끊김 등)대로 PromQL 에 답한다
@@ -55,6 +55,7 @@ nova-loadtest/
 │       ├── control/             시험 한 번의 흐름(발급 → k6 → 감시 → 판정 → 결과)과 정리 모드
 │       ├── report/              summary.json, summary.md
 │       ├── awsio/               S3, SQS 를 control 의 인터페이스에 맞춤
+│       ├── gha/                 cmd/gha 의 로직: 실행 위치 확인, 입력, 값 가리기, 사전 점검, OIDC 세션 갱신, 결과 정리
 │       ├── clock/               시계(테스트는 가짜 시계로 시간을 바로 흘린다)
 │       └── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-ecs 서버가 같이 쓴다
 ├── token-minter/                토큰 발급기(Go, distroless)

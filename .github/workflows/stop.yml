@@ -1,0 +1,43 @@
+name: stop
+
+# 시험 ID 의 k6 태스크를 멈춘다. 컨트롤러는 남아 "중단" 결과를 쓰고 뒷정리를 한다.
+# 승인 없이 바로 멈출 수 있도록 environment 를 쓰지 않고 빌드 역할(main 조건)을 맡는다.
+on:
+  workflow_dispatch:
+    inputs:
+      test_id:
+        description: 시험 ID(lt-yyyymmddthhmm-번호)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  stop:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: build
+        run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
+
+      - name: stop
+        env:
+          AWS_REGION: ap-northeast-2
+          AWS_ROLE_ARN: ${{ secrets.AWS_BUILD_ROLE_ARN }}
+          TEST_ID: ${{ inputs.test_id }}
+          LOADTEST_CLUSTER: nova-prod-loadtest
+          K6_FAMILY: nova-prod-loadtest-k6
+        run: '"$RUNNER_TEMP/gha" stop'

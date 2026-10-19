@@ -81,6 +81,19 @@ flowchart LR
 
 ## 실행할 때 넘기는 값
 
+### 워크플로가 컨트롤러에 넘기는 값(RunTask 덮어쓰기)
+
+| 환경 변수 | 내용 |
+|---|---|
+| `MODE` | `run`(시험) 또는 `cleanup`(정리) |
+| `TEST_ID` | 시험 ID. 정리 모드에서는 정리할 시험의 ID이고, 컨트롤러의 `startedBy`는 `<시험 ID>-c`이다 |
+| `RUN_TASK`, `OBSERVABILITY` | SSM 두 파라미터의 JSON. 컨트롤러는 SSM을 직접 읽지 않는다 |
+| `INPUT_JSON` | 워크플로 입력(`test_id`, `scenario`, `product_id` 등)과 러너가 계획한 시각(`planned_at`). 컨트롤러는 이 시각으로 계획을 다시 계산한다. 컨트롤러가 몇 분 늦게 떠도 `open_at` 검사가 러너와 같게 나오게 하려는 것이다 |
+| `PLAN_JSON` | 러너가 계산한 계획. 다시 계산한 계획과 다르면 아무것도 띄우지 않고 멈춘다 |
+| `BASE_URL` | 부하를 보낼 API 주소 |
+
+컨트롤러의 종료 코드는 0(결과를 남겼다. 시험 결과와는 무관), 1(실패), 2(정리를 거절했다)이다. 시험 결과는 `results/<시험 ID>/summary.json`의 `result`로 본다.
+
 ### 컨트롤러가 k6에 넘기는 값(RunTask 덮어쓰기)
 
 `TEST_ID`, `TASK_INDEX`, `START_AT`, `SEGMENT`, `SEGMENT_SEQUENCE`, `PLAN_JSON`, `PRODUCT_ID`, `PREP_PRODUCT_ID`, `TOKENS_URI`, `RESULTS_URI`, `BASE_URL`, `OTEL_RESOURCE_ATTRIBUTES`, `K6_OTEL_HTTP_EXPORTER_ENDPOINT`. 뜻은 [구현 계획 2.2](implementation-plan.md#22-k6-k6)에 있다.

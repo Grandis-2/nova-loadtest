@@ -46,11 +46,17 @@ nova-loadtest/
 │   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
 │   ├── cmd/fake-mimir/          로컬·CI 시험용. 정해 둔 각본(합격, 오류율 초과, 지표 끊김 등)대로 PromQL 에 답한다
 │   ├── cmd/fake-ecs/            로컬·CI 시험용. RunTask/ListTasks/DescribeTasks/StopTask 를 받아 각본대로 태스크 상태와 종료 코드를 바꾼다
+│   ├── Dockerfile               컨트롤러 이미지(distroless)
 │   └── internal/
 │       ├── plan/                입력 + scenarios.yml → 계획(도착률, 대수, 회원, VU, 시간)
-│       ├── runner/              RunTask(startedBy=시험 ID, tags 없음), 시작 대기, 중지
-│       ├── mimir/               obs 태스크 IP 찾기, PromQL 조회, 중단 기준, 판정
-│       └── report/              summary.json, summary.md
+│       ├── infra/               RUN_TASK, OBSERVABILITY 읽기와 검사, 로그에서 가릴 값
+│       ├── runner/              RunTask(startedBy=시험 ID, tags 없음), 상태 보기, 중지, obs 태스크 IP 찾기
+│       ├── mimir/               PromQL 조회(IP 다시 찾기), 오류율·5xx·지표 끊김·구간 누락·구간 판정 값
+│       ├── control/             시험 한 번의 흐름(발급 → k6 → 감시 → 판정 → 결과)과 정리 모드
+│       ├── report/              summary.json, summary.md
+│       ├── awsio/               S3, SQS 를 control 의 인터페이스에 맞춤
+│       ├── clock/               시계(테스트는 가짜 시계로 시간을 바로 흘린다)
+│       └── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-ecs 서버가 같이 쓴다
 ├── token-minter/                토큰 발급기(Go, distroless)
 │   ├── Dockerfile
 │   ├── cmd/token-minter/        환경 변수를 읽어 토큰 파일을 S3 에 올린다
@@ -163,10 +169,10 @@ nova-loadtest/
 | 토큰 | 발급기 태스크를 실행하고 끝날 때까지 기다린다 |
 | 시작 | k6에 넘길 `K6_OTEL_*`를 수집 주소로 만든다(2.2). RunTask는 `RUN_TASK.tasks.<이름>`의 작업 정의 패밀리, 컨테이너 이름(`containerOverrides[].name`), 네트워크 세 키(`awsvpcConfiguration`에 그대로)와 `launchType=FARGATE`로 부른다. `START_AT`은 지금 + 2분이다. `open_at`이 있으면 `open_at` − (준비 구간 + 등록 대기)로 잡는다. k6 태스크 N 대를 실행한다. RunTask는 한 번에 10대까지라 나눠 부르고, 용량 부족 오류는 다시 시도한다. `tags`는 넘기지 않고 `startedBy`에 시험 ID를 넣는다. 뒷정리와 `stop.yml`은 `ListTasks(startedBy)`로 찾고 `DescribeTasks`의 작업 정의로 k6와 컨트롤러를 가른다. 그 시각까지 모두 RUNNING이 아니면 취소한다 |
 | 감시 | `START_AT` + 1분부터 15초마다 Mimir를 조회한다. Mimir 주소는 `OBSERVABILITY.mimir`의 클러스터와 서비스로 찾는다(`ListTasks` RUNNING → `DescribeTasks`의 ENI `privateIPv4Address`, 여럿이면 `startedAt`이 가장 늦은 것). 조회가 실패하면 다시 찾는다. 오류율이나 5xx 비율이 중단 기준을 1분 넘게 넘으면 모두 멈춘다(중단). 태스크 하나가 계획한 끝 시각 전에 99로 끝나도 나머지를 모두 멈춘다(중단). 태스크마다 `vus`의 마지막 시각을 보고, 1분 넘게 비거나 Mimir 조회가 1분 넘게 실패하면 모두 멈춘다(판정 불가) |
-| 판정 | 먼저 태스크마다 시험 구간 전체의 지표가 있는지 본다. 빠진 곳이 있으면 판정 불가로 둔다. 다 있으면 전체 구간과 유지 구간을 따로, 전체와 흐름(`name`)별로 판정한다. 결과는 합격, 불합격, 중단, 판정 불가, 한계 측정(stress) 중 하나다. stress는 단계마다 판정해 기준을 지킨 마지막 단계를 적는다. k6 종료 코드, 실행기 CPU, 태스크별 요약(`k6-<i>.json`)의 임계치 결과와 요청 수 합계를 함께 적는다. 요약이 없는 태스크는 그렇다고 적는다 |
+| 판정 | 먼저 태스크마다 시험 구간 전체의 지표가 있는지 본다. 빠진 곳이 있으면 판정 불가로 둔다. 다 있으면 전체 구간과 유지 구간을 따로, 전체와 흐름(`name`)별로 판정한다. 결과는 합격, 불합격, 중단, 판정 불가, 한계 측정(stress), 취소 중 하나다. 취소는 부하를 보내기 전에 멈춘 경우다(시작 시각까지 RUNNING 아님, 이미지 섞임, 발급기 실패, 시작 시각이 너무 가까움). stress는 단계마다 판정해 기준을 지킨 마지막 단계를 적는다. k6 종료 코드, 태스크별 요약(`k6-<i>.json`)의 요청 수와 실패 수를 함께 적는다. 요약이 없는 태스크는 그렇다고 적는다. 실행기 CPU(Container Insights)는 아직 적지 않는다(C-5에서 더한다) |
 | 기록 | S3 `results/<test_id>/plan.json`, `summary.json`, `summary.md`. 태스크별 `k6-<i>.json`은 `k6-runner`가 쓴다 |
 | 정리 | 토큰 파일을 지운다. 시험 데이터는 지우지 않는다 |
-| 정리 모드 | `cleanup.yml`이 `MODE=cleanup`으로 띄운다. `results/<test_id>/plan.json`에서 시험 상품 ID(`product_id`와 `prep_product_id`. spike에서는 둘이 다르다)와 회원 범위를 읽고, 두 상품을 모두 정리한다. 시험 클러스터에 다른 시험 ID의 태스크가 있으면 거절한다. `scenarios.yml`의 큐가 빌 때까지(최대 30분) SQS `GetQueueAttributes`로 기다린 뒤 정리 태스크를 실행하고, `cleanup.json`을 쓴다. 비지 않으면 정리하지 않고 실패한다 |
+| 정리 모드 | `cleanup.yml`이 `MODE=cleanup`으로 띄운다. `results/<test_id>/plan.json`에서 시험 상품 ID(`product_id`와 `prep_product_id`. spike에서는 둘이 다르다)와 회원 범위를 읽고, 두 상품을 모두 정리한다. 시험 클러스터에 다른 시험 ID의 태스크가 있으면 거절한다. `scenarios.yml`의 큐가 빌 때까지(최대 30분) SQS `GetQueueAttributes`로 기다린 뒤 정리 태스크를 실행하고, `cleanup.json`을 쓴다. 비지 않으면 정리하지 않고 실패한다. 정리 태스크에는 지금 `TEST_ID`, `PRODUCT_IDS`(쉼표로 구분), `MEMBERS`(풀 A, B, C 범위의 JSON)를 넘긴다. 이 형식은 인프라 I-6과 정한다 |
 
 **판정 쿼리**. 지금 예상하는 이름은 `<dur>` = `k6_http_req_duration_milliseconds`, `<reqs>` = `k6_http_reqs_total`, `<vus>` = `k6_vus`다(접두사 `k6_`에 Mimir가 단위와 종류 접미사를 붙인다). 모든 쿼리에 `job="loadtest/k6"`도 건다. 이름과 `le` 값의 형식(`500`인지 `500.0`인지)은 C-2에서 확정하고 `scenarios.yml`에 둔다. 코드에 박지 않는다.
 

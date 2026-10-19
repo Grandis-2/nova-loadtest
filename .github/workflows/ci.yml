@@ -1,0 +1,43 @@
+name: ci
+
+# PR 검사. pull_request_target 은 쓰지 않는다(docs/design.md "저장소 보호").
+# main push 에서도 돌려 머지된 결과와 로컬 Forgejo 미러를 확인한다.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      # 러너마다 shellcheck 유무가 달라 결과가 갈리므로 끈다
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes=
+
+      - name: 워크플로 규칙
+        run: |
+          sh .github/scripts/check-workflows-test.sh
+          sh .github/scripts/check-workflows.sh
+
+      # GitHub 과 로컬 Forgejo 중 어디서 돌았는지 남긴다(구현 계획 7.4)
+      - name: 실행 위치
+        env:
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          echo "실행 위치: ${SERVER_URL}"
+          echo "실행 위치: \`${SERVER_URL}\`" >> "$GITHUB_STEP_SUMMARY"

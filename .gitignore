@@ -10,3 +10,6 @@ node_modules/
 
 # 개인 작업 메모
 CLAUDE.local.md
+
+# 로컬 Forgejo 의 비밀번호와 토큰
+local/.data/

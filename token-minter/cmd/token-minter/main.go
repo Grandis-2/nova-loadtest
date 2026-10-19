@@ -63,6 +63,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("TOKEN_TTL_SECONDS: %w", err)
 	}
+	// 초를 시간 값으로 바꾸기 전에 범위를 본다. 아주 큰 값은 곱하는 중에 넘쳐 작은 양수가 될 수 있다
+	if max := int(cfg.Members.MaxTokenTTL.D().Seconds()); ttlSec <= 0 || ttlSec > max {
+		return fmt.Errorf("TOKEN_TTL_SECONDS %d는 1에서 %d 사이여야 한다", ttlSec, max)
+	}
 	req := mint.Request{Members: members, Tasks: tasks, TTL: time.Duration(ttlSec) * time.Second}
 	if err := mint.Check(cfg, req); err != nil {
 		return err

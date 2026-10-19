@@ -100,6 +100,7 @@ func TestCheck(t *testing.T) {
 		{"유효 시간 초과", func(r *Request) { r.TTL = 7 * time.Hour }, "유효 시간"},
 		{"풀 겹침", func(r *Request) { r.Members.C = Range{500, 100} }, "겹친다"},
 		{"태스크 0", func(r *Request) { r.Tasks = 0 }, "태스크"},
+		{"회원 없음(MEMBERS가 null, {})", func(r *Request) { r.Members = Members{} }, "회원이 하나도 없다"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := ok

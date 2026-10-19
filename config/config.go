@@ -7,6 +7,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -84,7 +86,12 @@ type Runner struct {
 	StartDelay        Duration `yaml:"start_delay"`
 	EntryGracefulStop Duration `yaml:"entry_graceful_stop"`
 	JobLimit          Duration `yaml:"job_limit"`
+	// open_at은 지금부터 이 시간 안이어야 한다. 이 대기를 토큰 유효 시간과 작업 시간 계산에 넣는다
+	MaxOpenAtLead Duration `yaml:"max_open_at_lead"`
 }
+
+// StepRampSeconds는 stress 단계 사이에서 다음 배수로 올리는 시간이다. 단계 시간은 이보다 길어야 한다
+const StepRampSeconds = 10
 
 type Members struct {
 	Start        int64    `yaml:"start"`
@@ -161,10 +168,35 @@ func Parse(b []byte) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("scenarios.yml: %w", err)
 	}
+	// 문서가 하나 더 있으면(---) 그 내용이 말없이 무시되므로 거절한다
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("scenarios.yml: YAML 문서는 하나여야 한다(--- 뒤에 문서가 더 있다)")
+	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("scenarios.yml: %w", err)
 	}
 	return &c, nil
+}
+
+// pos는 0보다 크고 유한한 수인지 본다. NaN은 모든 비교가 거짓이라 v <= 0 으로는 걸러지지 않는다
+func pos(vs ...float64) bool {
+	for _, v := range vs {
+		if !(v > 0) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// nonneg는 0 이상이고 유한한 수인지 본다
+func nonneg(vs ...float64) bool {
+	for _, v := range vs {
+		if !(v >= 0) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate는 계산에 쓰는 값이 빠지거나 틀리지 않았는지 본다.
@@ -181,8 +213,8 @@ func (c *Config) Validate() error {
 			bad("flows.%s가 없다", name)
 			continue
 		}
-		if f.Weight <= 0 || f.Requests <= 0 || f.IterationSeconds <= 0 {
-			bad("flows.%s: weight, requests, iteration_seconds는 0보다 커야 한다", name)
+		if !pos(f.Weight, f.Requests, f.IterationSeconds) || !nonneg(f.QueueRequests) {
+			bad("flows.%s: weight, requests, iteration_seconds는 0보다 크고 queue_requests는 0 이상이어야 한다", name)
 		}
 		switch f.Pool {
 		case PoolNone, PoolA, PoolB, PoolC:
@@ -193,10 +225,10 @@ func (c *Config) Validate() error {
 	if c.Flows["entry"].Pool != PoolA {
 		bad("flows.entry는 풀 a를 써야 한다")
 	}
-	if c.AdmissionRPS <= 0 || c.EntryCapRPS <= 0 || c.EntryCapRPS > c.AdmissionRPS {
+	if !pos(c.AdmissionRPS, c.EntryCapRPS) || c.EntryCapRPS > c.AdmissionRPS {
 		bad("entry_cap_rps는 0보다 크고 admission_rps 이하여야 한다")
 	}
-	if c.PollIntervalSeconds <= 0 || c.WAFLimitPer5m <= 0 {
+	if !pos(c.PollIntervalSeconds, c.WAFLimitPer5m) {
 		bad("poll_interval_seconds, waf_limit_per_5m은 0보다 커야 한다")
 	}
 
@@ -209,26 +241,37 @@ func (c *Config) Validate() error {
 			bad("scenarios.%s가 없다", name)
 			continue
 		}
-		if s.PeakRPS <= 0 || s.MaxRPS < s.PeakRPS || s.MaxVUs <= 0 || s.MaxDuration <= 0 || s.PoolB <= 0 {
+		if !pos(s.PeakRPS, s.MaxRPS) || s.MaxRPS < s.PeakRPS || s.MaxVUs <= 0 || s.MaxDuration <= 0 || s.PoolB <= 0 {
 			bad("scenarios.%s: peak_rps, max_rps(≥ peak_rps), max_vus, max_duration, pool_b를 확인한다", name)
 		}
 		switch s.Shape {
 		case ShapeConstant, ShapeRamping:
-			if s.Duration <= 0 {
-				bad("scenarios.%s.duration이 없다", name)
+			if s.Duration < Duration(time.Second) {
+				bad("scenarios.%s.duration은 1초 이상이어야 한다", name)
+			}
+			if s.RampUp < 0 || (s.Shape == ShapeRamping && s.RampUp < Duration(time.Second)) {
+				bad("scenarios.%s.ramp_up은 음수일 수 없고, ramping이면 1초 이상이어야 한다", name)
 			}
 		case ShapeSpike:
-			if s.BurstSeconds <= 0 || s.Duration <= 0 || s.ObserveEntryRPS < 0 {
-				bad("scenarios.%s: burst_seconds, duration(관찰 시간)이 필요하다", name)
+			if !pos(s.BurstSeconds) || s.Duration < Duration(time.Second) || !nonneg(s.ObserveEntryRPS) {
+				bad("scenarios.%s: burst_seconds, duration(관찰 시간 1초 이상)이 필요하고 observe_entry_rps는 0 이상이어야 한다", name)
 			}
-			for f := range s.Background {
+			for f, v := range s.Background {
 				if _, ok := c.Flows[f]; !ok || f == "entry" {
 					bad("scenarios.%s.background.%s: 진입을 뺀 흐름 이름이어야 한다", name, f)
 				}
+				if !nonneg(v) {
+					bad("scenarios.%s.background.%s: 0 이상이어야 한다", name, f)
+				}
 			}
 		case ShapeStep:
-			if len(s.Steps) == 0 || s.StepDuration <= 0 {
-				bad("scenarios.%s: steps, step_duration이 필요하다", name)
+			if len(s.Steps) == 0 || s.StepDuration <= Duration(StepRampSeconds*time.Second) {
+				bad("scenarios.%s: steps가 필요하고 step_duration은 %d초보다 길어야 한다", name, StepRampSeconds)
+			}
+			for i, m := range s.Steps {
+				if !pos(m) {
+					bad("scenarios.%s.steps[%d]: 배수는 0보다 커야 한다", name, i)
+				}
 			}
 		default:
 			bad("scenarios.%s.shape %q를 모른다", name, s.Shape)
@@ -236,22 +279,23 @@ func (c *Config) Validate() error {
 	}
 
 	r := c.Runner
-	if r.RequestsPerTask <= 0 || r.VUMemoryMB <= 0 || r.TaskMemoryMB <= 0 || r.Headroom < 0 ||
-		r.VUBurstFactor < 1 || r.MaxTasks <= 0 || r.StartDelay <= 0 || r.JobLimit <= 0 {
-		bad("runner 값을 확인한다")
+	if !pos(r.RequestsPerTask, r.VUMemoryMB, r.TaskMemoryMB) || !nonneg(r.Headroom) || !(r.VUBurstFactor >= 1) ||
+		math.IsInf(r.VUBurstFactor, 0) || r.MaxTasks <= 0 || r.StartDelay <= 0 || r.JobLimit <= 0 ||
+		r.EntryGracefulStop < Duration(time.Second) || r.MaxOpenAtLead <= 0 {
+		bad("runner 값을 확인한다(entry_graceful_stop은 1초 이상, max_open_at_lead는 0보다 커야 한다)")
 	}
 	m := c.Members
 	if m.Start <= 0 || m.Count <= 0 || m.Start+m.Count > 1_000_000_000_000 {
 		bad("members.start, count: 회원 번호는 1 이상 12자리 이하여야 한다")
 	}
-	if m.PrepRPS <= 0 || m.MaxTokenTTL <= 0 {
+	if !pos(m.PrepRPS) || m.MaxTokenTTL <= 0 || m.RegisterWait < 0 || m.TokenMargin < 0 {
 		bad("members.prep_rps, max_token_ttl은 0보다 커야 한다")
 	}
 	s := c.Series
 	if s.Limit <= 0 || s.Names <= 0 || s.StatusesPerName <= 0 || s.Histogram <= 0 {
 		bad("series 값을 확인한다")
 	}
-	if c.SLO.P95MS <= 0 || c.SLO.AbortErrorRate <= 0 || c.SLO.AbortAfter <= 0 {
+	if !pos(c.SLO.P95MS, c.SLO.AbortErrorRate, c.SLO.Abort5xxRate) || !nonneg(c.SLO.Max5xxRate) || c.SLO.AbortAfter <= 0 {
 		bad("slo 값을 확인한다")
 	}
 	return errors.Join(errs...)

@@ -53,6 +53,10 @@ func Check(cfg *config.Config, r Request) error {
 	if r.Tasks < 1 || r.Tasks > cfg.Runner.MaxTasks {
 		errs = append(errs, fmt.Errorf("태스크 수 %d는 1에서 %d 사이여야 한다", r.Tasks, cfg.Runner.MaxTasks))
 	}
+	// MEMBERS가 비었거나(null, {}) 모든 풀이 0이면 잘못 넘어온 요청이다. 빈 파일을 올리고 성공하지 않게 거절한다
+	if r.Members.A.Count+r.Members.B.Count+r.Members.C.Count <= 0 {
+		errs = append(errs, errors.New("회원이 하나도 없다(MEMBERS를 확인한다)"))
+	}
 	if r.TTL <= 0 || r.TTL > cfg.Members.MaxTokenTTL.D() {
 		errs = append(errs, fmt.Errorf("유효 시간 %s는 0보다 크고 %s 이하여야 한다", r.TTL, cfg.Members.MaxTokenTTL.D()))
 	}

@@ -2,6 +2,7 @@ package plan
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func input(scenario string) Input {
 	in := Input{TestID: testID, Scenario: scenario, ProductID: product, Now: now}
 	if scenario == "spike" {
 		in.PrepProductID = prepPID
-		in.OpenAt = "2026-10-20T06:30:00Z"
+		in.OpenAt = "2026-10-20T00:30:00Z" // 지금부터 30분 뒤(최대 1시간)
 	}
 	return in
 }
@@ -93,7 +94,7 @@ func TestMembersMatchDocs(t *testing.T) {
 	}{
 		{"stress", 31500, 6300},
 		{"soak", 72000, 14400},
-		{"spike", 8000, 611},
+		{"spike", 8000, 731}, // 취소는 등록 대기 2분 + 본 시험 611초 동안 초당 1건
 	} {
 		p := mustPlan(t, c, input(tc.scenario))
 		if p.Members.A.Count != tc.a || p.Members.C.Count != tc.c {
@@ -235,7 +236,7 @@ func TestDeterministic(t *testing.T) {
 	for _, s := range config.ScenarioOrder {
 		a, _ := json.Marshal(mustPlan(t, c, input(s)))
 		in := input(s)
-		in.Now = now.Add(37 * time.Minute) // 러너와 컨트롤러는 다른 시각에 계산한다
+		in.Now = now.Add(5 * time.Minute) // 러너와 컨트롤러는 다른 시각에 계산한다
 		b, _ := json.Marshal(mustPlan(t, c, in))
 		if string(a) != string(b) {
 			t.Fatalf("%s: 같은 입력인데 계획이 다르다", s)
@@ -252,5 +253,77 @@ func TestFlowOrderIgnored(t *testing.T) {
 	pb, _ := json.Marshal(mustPlan(t, c, b))
 	if string(pa) != string(pb) {
 		t.Fatal("흐름을 적는 순서나 중복에 따라 계획이 달라지면 안 된다")
+	}
+}
+
+// 리뷰(#2)에서 나온 경우들
+func TestRejectsInvalidInputs(t *testing.T) {
+	c := cfg(t)
+	with := func(s string, f func(*Input)) Input { in := input(s); f(&in); return in }
+	for _, tc := range []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{"1초 미만 duration", with("smoke", func(in *Input) { in.Flows = []string{"catalog"}; in.Duration = "500ms" }), "1초 이상"},
+		{"초 단위가 아닌 duration", with("smoke", func(in *Input) { in.Duration = "1.5s" }), "초 단위"},
+		{"NaN peak_rps", with("load", func(in *Input) { in.PeakRPS = math.NaN() }), "peak_rps"},
+		{"무한대 peak_rps", with("load", func(in *Input) { in.PeakRPS = math.Inf(1) }), "peak_rps"},
+		{"NaN abort_error_rate", with("load", func(in *Input) { in.AbortErrorRate = math.NaN() }), "abort_error_rate"},
+		{"stress의 duration", with("stress", func(in *Input) { in.Duration = "1h" }), "step_duration"},
+		{"smoke의 ramp_up", with("smoke", func(in *Input) { in.RampUp = "5m" }), "ramp_up"},
+		{"먼 open_at", with("spike", func(in *Input) { in.OpenAt = "2026-10-20T06:30:00Z" }), "1h0m0s 안"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { mustReject(t, c, tc.in, tc.want) })
+	}
+}
+
+// 토큰은 컨트롤러가 시작할 때 만들므로 시작 시각까지의 대기를 덮어야 한다
+func TestTokenTTLCoversWait(t *testing.T) {
+	c := cfg(t)
+	p := mustPlan(t, c, input("spike"))
+	min := c.Runner.MaxOpenAtLead.D() + time.Duration(p.Estimates.TotalSeconds)*time.Second
+	if got := time.Duration(p.TokenTTLSeconds) * time.Second; got < min {
+		t.Fatalf("토큰 유효 시간 %s가 대기 + 시험 시간 %s보다 짧다", got, min)
+	}
+}
+
+// k6가 실제로 도는 반복 수(1분당 정수 도착률 × 시간)만큼 회원이 있어야 한다
+func TestMembersCoverK6Iterations(t *testing.T) {
+	c := cfg(t)
+	iterations := func(p *Plan, flow string) int64 {
+		var n int64
+		for _, s := range p.Scenarios {
+			if s.Flow != flow {
+				continue
+			}
+			d, _ := time.ParseDuration(s.Duration)
+			n += int64(s.Rate) * int64(d.Seconds()) / 60
+		}
+		return n
+	}
+	soak := input("soak")
+	soak.PeakRPS = 103 // 진입 5.099/초가 1분당 306회(5.1/초)로 반올림된다
+	p := mustPlan(t, c, soak)
+	if a := iterations(p, "entry"); a > p.Members.A.Count {
+		t.Fatalf("soak: 진입 반복 %d회가 풀 A %d명보다 많다", a, p.Members.A.Count)
+	}
+	sp := mustPlan(t, c, input("spike"))
+	if n := iterations(sp, "cancel"); n > sp.Members.C.Count {
+		t.Fatalf("spike: 취소 반복 %d회가 풀 C %d명보다 많다", n, sp.Members.C.Count)
+	}
+}
+
+// 맵 순회 순서와 상관없이 늘 같은 계획이 나와야 한다
+func TestDeterministicRepeated(t *testing.T) {
+	c := cfg(t)
+	for _, s := range config.ScenarioOrder {
+		first, _ := json.Marshal(mustPlan(t, c, input(s)))
+		for range 50 {
+			again, _ := json.Marshal(mustPlan(t, c, input(s)))
+			if string(again) != string(first) {
+				t.Fatalf("%s: 같은 입력인데 계획이 다르다", s)
+			}
+		}
 	}
 }

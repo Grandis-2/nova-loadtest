@@ -180,8 +180,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if peak == 0 {
 		peak = sc.PeakRPS
 	}
-	if peak <= 0 || peak > sc.MaxRPS {
-		fail("peak_rps %.0f가 %s 상한(%.0f)을 넘는다", peak, in.Scenario, sc.MaxRPS)
+	if !(peak > 0) || peak > sc.MaxRPS {
+		fail("peak_rps %v는 0보다 크고 %s 상한 %.0f 이하여야 한다", peak, in.Scenario, sc.MaxRPS)
 	}
 	dur, err := durationOr(in.Duration, sc.Duration.D())
 	if err != nil {
@@ -195,8 +195,15 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if abortRate == 0 {
 		abortRate = cfg.SLO.AbortErrorRate
 	}
-	if abortRate <= 0 || abortRate > 50 {
-		fail("abort_error_rate %.1f는 0보다 크고 50 이하여야 한다", abortRate)
+	if !(abortRate > 0) || abortRate > 50 {
+		fail("abort_error_rate %v는 0보다 크고 50 이하여야 한다", abortRate)
+	}
+	// 이 시나리오에서 쓰지 않는 입력은 말없이 무시하지 않고 거절한다
+	if in.Duration != "" && sc.Shape == config.ShapeStep {
+		fail("stress에는 duration을 쓰지 않는다. 단계 시간은 scenarios.yml의 step_duration이다")
+	}
+	if in.RampUp != "" && sc.Shape != config.ShapeRamping {
+		fail("%s에는 ramp_up을 쓰지 않는다(올리는 구간이 있는 시나리오는 load뿐이다)", in.Scenario)
 	}
 
 	// 상품
@@ -234,6 +241,9 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		openAt, err = time.Parse(time.RFC3339, in.OpenAt)
 		if err != nil {
 			fail("open_at %q는 RFC 3339 시각이어야 한다(예: 2026-10-20T06:30:00Z)", in.OpenAt)
+		} else if lead := cfg.Runner.MaxOpenAtLead.D(); openAt.After(in.Now.Add(lead)) {
+			// 기다리는 동안에도 작업 시간과 토큰 유효 시간이 흐른다. 그 상한을 정하려고 대기를 묶는다
+			fail("open_at은 지금부터 %s 안이어야 한다(작업 6시간 상한과 토큰 유효 시간에 대기가 들어간다)", lead)
 		}
 	}
 	if len(errs) > 0 {
@@ -260,10 +270,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	for _, f := range flows {
 		sumW += cfg.Flows[f].Weight
 	}
+	// 도착률은 k6가 실제로 쓰는 값(1분당 정수 반복)으로 맞춘다. 그래야 회원 수가 k6의 반복 수와 같아진다
 	base := func(mult float64) map[string]float64 {
 		r := map[string]float64{}
 		for _, f := range flows {
-			r[f] = cfg.Flows[f].Weight * mult
+			r[f] = quant(cfg.Flows[f].Weight * mult)
 		}
 		return r
 	}
@@ -271,7 +282,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		if r["entry"] > cfg.EntryCapRPS {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: 진입 %.1f/초를 상한 %.0f/초로 묶었다(입장 속도 %.0f/초의 80%%)",
 				label, r["entry"], cfg.EntryCapRPS, cfg.AdmissionRPS))
-			r["entry"] = cfg.EntryCapRPS
+			r["entry"] = quant(cfg.EntryCapRPS)
 		}
 	}
 
@@ -346,7 +357,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		last := sc.Steps[len(sc.Steps)-1]
 		p.Multiplier = peak / (sumW * last) // 평시 비율의 몇 배를 1배로 볼지
 		stepS := int(sc.StepDuration.D().Seconds())
-		const stepRamp = 10
+		const stepRamp = config.StepRampSeconds
 		mainLen = stepS * len(sc.Steps)
 		stepRates := make([]map[string]float64, len(sc.Steps))
 		for i, m := range sc.Steps {
@@ -392,9 +403,14 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		mainLen = 1 + burstS + observeS // 몰림은 open_at + 1초에 시작한다(시계 어긋남)
 		bg := map[string]float64{}
 		for _, f := range flows {
-			if v, ok := sc.Background[f]; ok {
-				bg[f] = v
+			if v, ok := sc.Background[f]; ok && v > 0 {
+				bg[f] = quant(v)
 			}
+		}
+		peak = quant(peak)
+		observeRPS := 0.0
+		if sc.ObserveEntryRPS > 0 {
+			observeRPS = quant(sc.ObserveEntryRPS)
 		}
 		// 몰림 동안 줄에 서는 회원과 그 확인 요청
 		waiting := math.Max(0, (peak-cfg.AdmissionRPS)*float64(burstS))
@@ -403,10 +419,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		// 접수는 입장한 회원만 보내므로 입장 속도를 넘지 않는다. rates의 진입(peak)으로 센 접수를 그만큼 줄인다
 		burst.extraW = (math.Min(peak, cfg.AdmissionRPS) - peak) * cfg.Flows["entry"].Requests
 		observe := phase{rates: clone(bg)}
-		observe.rates["entry"] = sc.ObserveEntryRPS
+		observe.rates["entry"] = observeRPS
 		phases = append(phases, burst, observe)
-		entryTotal = peak*float64(burstS) + sc.ObserveEntryRPS*float64(observeS)
-		cancelTotal = bg["cancel"] * float64(mainLen)
+		entryTotal = peak*float64(burstS) + observeRPS*float64(observeS)
+		// 배경 취소는 준비가 끝난 뒤(등록 대기 포함)부터 시험 끝까지 돈다
+		cancelTotal = bg["cancel"] * float64(int(cfg.Members.RegisterWait.D().Seconds())+mainLen)
 		build = func(ms int) {
 			// 배경은 준비가 끝난 뒤부터 시험 끝까지 돈다
 			bgStart := prepS
@@ -420,7 +437,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			entryIter := cfg.Flows["entry"].IterationSeconds
 			// 몰림의 회원은 입장할 때까지 VU를 하나씩 잡는다
 			addConstant("entry_burst", "entry", peak, ms+1, burstS, peak*float64(burstS))
-			addConstant("entry_observe", "entry", sc.ObserveEntryRPS, ms+1+burstS, observeS, sc.ObserveEntryRPS*entryIter)
+			addConstant("entry_observe", "entry", observeRPS, ms+1+burstS, observeS, observeRPS*entryIter)
 			windows = append(windows, Window{"spike", ms, ms + mainLen})
 		}
 	}
@@ -434,7 +451,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 	mainStart := prepS + waitS
 	if prepS > 0 {
-		prepRate := math.Min(cfg.Members.PrepRPS, float64(poolB+poolC)/float64(prepS))
+		prepRate := quant(math.Min(cfg.Members.PrepRPS, float64(poolB+poolC)/float64(prepS)))
 		addConstant("prepare", "prepare", prepRate, 0, prepS, prepRate*cfg.Flows["entry"].IterationSeconds)
 		phases = append(phases, phase{rates: map[string]float64{"entry": prepRate}, prep: true})
 	}
@@ -472,7 +489,9 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	var peakFlow, peakReq, peakWAF float64
 	for _, ph := range phases {
 		var fl, rq, wf float64
-		for f, r := range ph.rates {
+		// 맵은 순회 순서가 매번 달라 부동소수점 합계의 끝자리가 바뀔 수 있다. 늘 같은 순서로 더한다
+		for _, f := range config.FlowOrder {
+			r := ph.rates[f]
 			fl += r
 			rq += r * (cfg.Flows[f].Requests + cfg.Flows[f].QueueRequests)
 			wf += r * cfg.Flows[f].Requests
@@ -523,6 +542,13 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		fail("예상 시계열 %d개가 상한 %d개를 넘는다", series, s.Limit)
 	}
 
+	// 컨트롤러가 시작한 뒤 START_AT까지 기다리는 최대 시간. open_at이 있으면 그 상한, 없으면 start_delay다.
+	// 지금 시각에 기대지 않아야 러너와 컨트롤러의 계획이 같다
+	lead := cfg.Runner.StartDelay.D()
+	if p.OpenAt != "" {
+		lead = cfg.Runner.MaxOpenAtLead.D()
+	}
+
 	// 회원
 	if usesPool(config.PoolA) || poolB+poolC > 0 {
 		m := cfg.Members
@@ -538,7 +564,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		if t := p.Members.Total(); t > m.Count {
 			fail("필요한 회원 %d명(풀 A %d, B %d, C %d)이 시험 회원 %d명보다 많다", t, a, poolB, poolC, m.Count)
 		}
-		ttl := time.Duration(total)*time.Second + m.TokenMargin.D()
+		// 토큰은 컨트롤러가 시작할 때 만든다. 시작 시각까지의 대기도 유효 시간에 넣는다
+		ttl := lead + time.Duration(total)*time.Second + m.TokenMargin.D()
 		if ttl > m.MaxTokenTTL.D() {
 			fail("토큰 유효 시간 %s가 상한 %s를 넘는다", ttl, m.MaxTokenTTL.D())
 		}
@@ -549,7 +576,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if dur > sc.MaxDuration.D() {
 		fail("duration %s가 %s 상한 %s를 넘는다", dur, in.Scenario, sc.MaxDuration.D())
 	}
-	if t := time.Duration(total)*time.Second + cfg.Runner.StartDelay.D(); t > cfg.Runner.JobLimit.D() {
+	if t := lead + time.Duration(total)*time.Second; t > cfg.Runner.JobLimit.D() {
 		fail("예상 시간 %s가 GitHub Actions 작업 상한 %s를 넘는다", t, cfg.Runner.JobLimit.D())
 	}
 	if !openAt.IsZero() {
@@ -581,8 +608,9 @@ func durationOr(s string, def time.Duration) (time.Duration, error) {
 		return def, nil
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("%q는 2m, 30m, 4h 같은 양의 시간이어야 한다", s)
+	// k6 시나리오는 초 단위로 만든다. 1초 미만이나 초 단위가 아닌 값은 잘려서 시나리오가 사라질 수 있다
+	if err != nil || d < time.Second || d%time.Second != 0 {
+		return 0, fmt.Errorf("%q는 2m, 30m, 4h 같은 1초 이상, 초 단위의 시간이어야 한다", s)
 	}
 	return d, nil
 }
@@ -594,6 +622,9 @@ func setVUs(s *K6Scenario, est, factor float64) {
 }
 
 func perMinute(rps float64) int { return max(1, int(math.Round(rps*60))) }
+
+// quant는 초당 도착률을 k6가 쓰는 1분당 정수 반복으로 맞춘 값이다
+func quant(rps float64) float64 { return float64(perMinute(rps)) / 60 }
 
 func secs(s int) string { return fmt.Sprintf("%ds", s) }
 

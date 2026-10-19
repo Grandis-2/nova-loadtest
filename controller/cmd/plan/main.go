@@ -59,7 +59,7 @@ func main() {
 	p, err := plan.New(cfg, in)
 	if err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
-			fmt.Printf("::error::%s\n", line)
+			fmt.Fprintf(os.Stderr, "::error::%s\n", line)
 		}
 		os.Exit(1)
 	}
@@ -73,8 +73,10 @@ func main() {
 	} else if err := os.WriteFile(jsonOut, append(b, '\n'), 0o644); err != nil {
 		fatal("%v", err)
 	}
+	// 경고는 stderr로 쓴다. 표준 출력에는 계획 JSON만 나가야 PLAN_JSON=$(plan ...) 처럼 받을 수 있다.
+	// Actions는 stderr의 ::warning:: 도 주석으로 보인다
 	for _, w := range p.Warnings {
-		fmt.Printf("::warning::%s\n", w)
+		fmt.Fprintf(os.Stderr, "::warning::%s\n", w)
 	}
 	if summaryOut != "" {
 		f, err := os.OpenFile(summaryOut, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -89,6 +91,6 @@ func main() {
 }
 
 func fatal(format string, a ...any) {
-	fmt.Printf("::error::"+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "::error::"+format+"\n", a...)
 	os.Exit(1)
 }

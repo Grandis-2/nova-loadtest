@@ -108,6 +108,7 @@ runner:
   start_delay: 2m          # 컨트롤러가 START_AT 을 지금 + 이 시간으로 잡는다
   entry_graceful_stop: 3m  # 줄에 선 회원이 잘리지 않게
   job_limit: 6h            # GitHub Actions 작업 하나의 상한
+  max_open_at_lead: 1h     # open_at 은 지금부터 이 시간 안이어야 한다. 이 대기를 토큰 유효 시간과 작업 시간에 넣는다
 
 members:
   start: 1                 # 시험 회원 번호. id = 10ad7e57-0000-7000-8000-<12자리 번호>

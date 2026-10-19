@@ -37,7 +37,18 @@ jobs:
           cache: false
 
       - name: build
+        # 모듈 받기가 네트워크 문제로 멈추면 작업이 끝까지 기다리지 않게 한다
+        timeout-minutes: 10
         run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
+
+      # 로컬 Forgejo 에서는 컨테이너를 띄울 수 없어 컨트롤러를 작업 안에서 바로 돌린다(CONTROLLER_INLINE)
+      - name: build controller (local)
+        # 모듈 받기가 네트워크 문제로 멈추면 작업이 끝까지 기다리지 않게 한다
+        timeout-minutes: 10
+        if: github.server_url != 'https://github.com'
+        run: |
+          go build -o "$RUNNER_TEMP/controller" ./controller/cmd/controller
+          echo "CONTROLLER_BIN=$RUNNER_TEMP/controller" >> "$GITHUB_ENV"
 
       - name: cleanup
         env:

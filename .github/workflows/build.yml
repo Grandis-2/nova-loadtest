@@ -45,6 +45,8 @@ jobs:
           cache: false
 
       - name: build gha
+        # 모듈 받기가 네트워크 문제로 멈추면 작업이 끝까지 기다리지 않게 한다
+        timeout-minutes: 10
         run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
 
       # 레지스트리 주소에 계정 ID 가 있어 가리고, 뒤 단계에 REGISTRY 환경 변수로 넘긴다
@@ -87,6 +89,8 @@ jobs:
           cache: false
 
       - name: build gha
+        # 모듈 받기가 네트워크 문제로 멈추면 작업이 끝까지 기다리지 않게 한다
+        timeout-minutes: 10
         run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
 
       # 지난 실행을 다시 돌려도 오래된 커밋으로 latest 를 되돌리지 않는다

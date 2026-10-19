@@ -230,6 +230,13 @@ func (f *Fake) StopTask(_ context.Context, in *ecs.StopTaskInput, _ ...func(*ecs
 	return &ecs.StopTaskOutput{}, nil
 }
 
+// Snapshot 은 받은 RunTask, StopTask 기록의 사본이다(다른 고루틴이 기록하는 중에도 읽을 수 있다)
+func (f *Fake) Snapshot() ([]RunCall, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]RunCall(nil), f.Runs...), append([]string(nil), f.Stops...)
+}
+
 // RunsOf 는 패밀리 하나의 RunTask 기록이다.
 func (f *Fake) RunsOf(family string) []RunCall {
 	f.mu.Lock()

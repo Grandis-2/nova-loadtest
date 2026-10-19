@@ -80,16 +80,16 @@ func TestTestID(t *testing.T) {
 
 func TestInputs(t *testing.T) {
 	in, err := Inputs(envOf(map[string]string{
-		"TEST_ID": "lt-20261020t0630-1", "INPUT_SCENARIO": "load", "INPUT_PRODUCT_ID": " p ", "INPUT_PEAK_RPS": "300",
-		"INPUT_RUNNERS": "", "INPUT_FLOWS": "catalog, entry,", "PLANNED_AT": "2026-10-20T06:30:00Z",
+		"TEST_ID": "lt-20261020t0630-1", "LT_SCENARIO": "load", "LT_PRODUCT_ID": " p ", "LT_PEAK_RPS": "300",
+		"LT_RUNNERS": "", "LT_FLOWS": "catalog, entry,", "PLANNED_AT": "2026-10-20T06:30:00Z",
 	}))
 	if err != nil || in.ProductID != "p" || in.PeakRPS != 300 || len(in.Flows) != 2 || in.Now.IsZero() {
 		t.Fatalf("%+v %v", in, err)
 	}
-	if _, err := Inputs(envOf(map[string]string{"INPUT_PEAK_RPS": "많이"})); err == nil {
+	if _, err := Inputs(envOf(map[string]string{"LT_PEAK_RPS": "많이"})); err == nil {
 		t.Fatal("숫자가 아니면 실패해야 한다")
 	}
-	if _, err := Inputs(envOf(map[string]string{"INPUT_RUNNERS": "1.9"})); err == nil {
+	if _, err := Inputs(envOf(map[string]string{"LT_RUNNERS": "1.9"})); err == nil {
 		t.Fatal("태스크 대수가 정수가 아니면 실패해야 한다(1 로 줄이지 않는다)")
 	}
 }
@@ -173,7 +173,7 @@ func newRun(t *testing.T, summary string) *runFixture {
 	stepSummary := filepath.Join(t.TempDir(), "summary.md")
 	f.vars = map[string]string{
 		"GITHUB_SERVER_URL": "https://github.com", "TEST_ID": "lt-20261020t0600-1", "PLANNED_AT": "2026-10-20T06:00:00Z",
-		"INPUT_SCENARIO": "smoke", "INPUT_PRODUCT_ID": product, "INPUT_DURATION": "2m", "BASE_URL": f.server.URL,
+		"LT_SCENARIO": "smoke", "LT_PRODUCT_ID": product, "LT_DURATION": "2m", "BASE_URL": f.server.URL,
 		"GITHUB_STEP_SUMMARY": stepSummary,
 	}
 	f.env = Env{SSM: fakeSSM{ParamRunTask: runTaskJSON, ParamObservability: obsJSON}, ECS: f.ecs, S3: f.s3,

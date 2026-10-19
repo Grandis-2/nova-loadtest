@@ -1,5 +1,5 @@
 # 로컬 확인용 Forgejo 와 러너. 운영에 쓰지 않는다(구현 계획 7절).
-# 띄우는 법은 local/README.md. moto, fake-ecs, fake-mimir 는 컨트롤러와 함께 더한다.
+# 띄우는 법은 local/README.md. 3단계 각본(moto, fake-cluster, fake-api)은 local/scenarios 가 돌린다.
 name: nova-loadtest-local
 
 services:
@@ -66,6 +66,34 @@ services:
         [ -f .runner ] || forgejo-runner register --no-interactive \
           --instance http://forgejo:3000 --name local --token "$$RUNNER_TOKEN"
         exec forgejo-runner --config /config/runner.yml daemon
+
+  # S3, SSM, SQS 흉내. 실행기가 결과를 읽도록 127.0.0.1 에만 연다
+  moto:
+    image: motoserver/moto:5.2.3
+    ports:
+      - "127.0.0.1:5000:5000"
+
+  # 가짜 ECS(:8080)와 가짜 Mimir(:9009). 각본 제어(:8081)는 127.0.0.1 에만 연다
+  fake-cluster:
+    build:
+      context: ..
+      dockerfile: local/fakes.Dockerfile
+    entrypoint: ["/fake-cluster"]
+    depends_on: [moto]
+    environment:
+      AWS_ENDPOINT_URL: http://moto:5000
+      AWS_REGION: ap-northeast-2
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  # 사전 점검이 부르는 공개 상품 API(vars.BASE_URL)
+  fake-api:
+    build:
+      context: ..
+      dockerfile: local/fakes.Dockerfile
+    entrypoint: ["/fake-api"]
 
 volumes:
   forgejo-data:

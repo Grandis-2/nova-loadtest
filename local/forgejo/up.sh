@@ -16,9 +16,11 @@ mkdir -p "$data"
 compose up -d --wait forgejo
 
 if ! fj admin user list --admin | awk '{print $2}' | grep -qx "$user"; then
-  openssl rand -hex 16 > "$data/admin-password"
+  # 비밀번호가 프로세스 인자에 보이지 않도록 Forgejo 가 만들게 하고, 출력에서 읽어 둔다
   fj admin user create --admin --username "$user" --email "$user@localhost" \
-    --password "$(cat "$data/admin-password")" --must-change-password=false
+    --random-password --random-password-length 32 --must-change-password=false \
+    | sed -n "s/^generated random password is '\(.*\)'$/\1/p" > "$data/admin-password"
+  [ -s "$data/admin-password" ] || { echo "관리자 비밀번호를 읽지 못했다" >&2; exit 1; }
 fi
 if [ ! -s "$data/token" ]; then
   fj admin user generate-access-token --username "$user" --token-name mirror \

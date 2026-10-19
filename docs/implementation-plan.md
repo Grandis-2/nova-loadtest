@@ -93,7 +93,7 @@ nova-loadtest/
 | `PRODUCT_ID`, `PREP_PRODUCT_ID` | 진입 상품, 준비 구간 상품. 옵션 ID는 `setup()`에서 상품 상세로 읽는다 |
 | `TOKENS_URI` | 토큰 위치(`s3://<버킷>/tokens/<test_id>/`). `k6-runner`가 여기서 받아 로컬 파일로 두고, k6는 로컬 파일만 읽는다 |
 | `BASE_URL` | `https://api.grandis-nova.link` |
-| `LOADTEST_HEADER` | 부하 시험 헤더 값(작업 정의 `secrets`). 없으면 헤더를 붙이지 않는다(smoke) |
+| `LOADTEST_HEADER` | 부하 시험 헤더 값(작업 정의 `secrets`). 시나리오와 관계없이 늘 붙인다. 첫 smoke는 WAF 예외(I-5)를 적용하기 전에 돌므로, 헤더가 있어도 요청 제한을 받는다는 전제로 계획한다 |
 | `OTEL_RESOURCE_ATTRIBUTES` | `service.instance.id=<i>,service.namespace=loadtest` |
 | `K6_OTEL_HTTP_EXPORTER_ENDPOINT` | `observability.otlpEndpoint` 그대로(scheme 없는 `host:port`) |
 
@@ -156,7 +156,7 @@ nova-loadtest/
 | 판정 | 먼저 태스크마다 시험 구간 전체의 지표가 있는지 본다. 빠진 곳이 있으면 판정 불가로 둔다. 다 있으면 전체 구간과 유지 구간을 따로, 전체와 흐름(`name`)별로 판정한다. 결과는 합격, 불합격, 중단, 판정 불가, 한계 측정(stress) 중 하나다. stress는 단계마다 판정해 기준을 지킨 마지막 단계를 적는다. k6 종료 코드, 실행기 CPU, 태스크별 요약(`k6-<i>.json`)의 임계치 결과와 요청 수 합계를 함께 적는다. 요약이 없는 태스크는 그렇다고 적는다 |
 | 기록 | S3 `results/<test_id>/plan.json`, `summary.json`, `summary.md`. 태스크별 `k6-<i>.json`은 `k6-runner`가 쓴다 |
 | 정리 | 토큰 파일을 지운다. 시험 데이터는 지우지 않는다 |
-| 정리 모드 | `cleanup.yml`이 `MODE=cleanup`으로 띄운다. `results/<test_id>/plan.json`에서 시험 상품 ID와 회원 범위를 읽는다. 시험 클러스터에 다른 시험 ID의 태스크가 있으면 거절한다. `scenarios.yml`의 큐가 빌 때까지(최대 30분) SQS `GetQueueAttributes`로 기다린 뒤 정리 태스크를 실행하고, `cleanup.json`을 쓴다. 비지 않으면 정리하지 않고 실패한다 |
+| 정리 모드 | `cleanup.yml`이 `MODE=cleanup`으로 띄운다. `results/<test_id>/plan.json`에서 시험 상품 ID(`product_id`와 `prep_product_id`. spike에서는 둘이 다르다)와 회원 범위를 읽고, 두 상품을 모두 정리한다. 시험 클러스터에 다른 시험 ID의 태스크가 있으면 거절한다. `scenarios.yml`의 큐가 빌 때까지(최대 30분) SQS `GetQueueAttributes`로 기다린 뒤 정리 태스크를 실행하고, `cleanup.json`을 쓴다. 비지 않으면 정리하지 않고 실패한다 |
 
 **판정 쿼리**. 지금 예상하는 이름은 `<dur>` = `k6_http_req_duration_milliseconds`, `<reqs>` = `k6_http_reqs_total`, `<vus>` = `k6_vus`다(접두사 `k6_`에 Mimir가 단위와 종류 접미사를 붙인다). 모든 쿼리에 `job="loadtest/k6"`도 건다. 이름과 `le` 값의 형식(`500`인지 `500.0`인지)은 C-2에서 확정하고 `scenarios.yml`에 둔다. 코드에 박지 않는다.
 
@@ -371,7 +371,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 이미지 섞임 | 태스크 1의 `imageDigest`가 다름 | 없음 | 시작 시각 전에 모든 태스크를 멈추고 실패. 결과에 다이제스트 두 개가 적힌다 |
 | 수집 주소 덮어쓰기 | 받은 RunTask를 기록 | 정상 | 모든 k6 RunTask의 덮어쓰기에 `K6_OTEL_HTTP_EXPORTER_ENDPOINT=<host:port>`와 태스크마다 다른 `OTEL_RESOURCE_ATTRIBUTES`가 있다. 작업 정의 고정값(전송 방식 등)은 덮어쓰기에 없다. 실행 로그에 버킷 이름, 서브넷, 보안 그룹 ID가 찍히지 않았다 |
 | obs 재배포 | 관측 서비스 태스크가 둘(`startedAt` 다름), 도중에 이전 것이 사라짐 | 늦게 시작한 IP에서만 정상 | 늦게 시작한 태스크를 고르고, 판정대로 "합격" |
-| 정리 | 데이터 태스크가 0으로 끝남 | 없음 | `cleanup.yml`이 `plan.json`의 상품 ID로 데이터 태스크를 띄우고 `cleanup.json`을 쓴다. moto SQS 큐에 메시지를 남겨 두면 기다리다 실패한다 |
+| 정리 | 데이터 태스크가 0으로 끝남 | 없음 | `cleanup.yml`이 `plan.json`의 상품 ID 두 개(spike 계획)로 데이터 태스크를 띄우고 `cleanup.json`을 쓴다. moto SQS 큐에 메시지를 남겨 두면 기다리다 실패한다 |
 | 정리 거절 | 다른 시험 ID의 k6가 RUNNING | 없음 | `tasks.data`가 없을 때, 끝나지 않은 시험 ID 일 때, 다른 시험이 돌 때 데이터 태스크를 띄우지 않고 실패한다 |
 | 컨트롤러 사망 | 컨트롤러가 도중에 137 | 정상 | `summary.json`이 없어 "판정 불가". 뒷정리가 남은 k6 태스크를 멈춘다 |
 | 수동 중지 | RUNNING | 정상 | 도중에 `stop.yml`을 돌리면 k6만 멈추고 컨트롤러가 "중단" 결과를 쓴다 |

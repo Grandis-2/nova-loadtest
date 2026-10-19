@@ -147,7 +147,9 @@
 **smoke**
 
 - smoke는 두 번에 나눠 돌린다. 먼저 토큰, 회원, 시험 상품 없이 상품 조회만으로 이미지, 실행 경로, 지표 경로를 확인한다(C-2). 그다음에 다섯 흐름을 모두 돌린다(C-4).
-- smoke는 WAF 예외 없이 돈다. k6 1대가 IP 하나를 쓰므로, 요청 수가 IP당 5분 3,000회(대기열 경로는 제외) 안에 들어야 한다. 준비 구간(풀 B 50명과 풀 C 몇 명의 접수)과 본 시험 2분(흐름당 요청 수를 반영하면 초당 약 8건)을 합치면 5분 창에 약 1,100건이다.
+- smoke는 WAF 예외 없이 돈다. k6 1대가 IP 하나를 쓰므로, 요청 수가 IP당 5분 3,000회(대기열 경로는 제외) 안에 들어야 한다.
+  - 흐름당 요청 수는 상품 조회 3건, 예약 조회 3건, 결제 3건, 취소 2건, 진입과 접수 1건(대기열 확인은 제외 경로)이다. 평시 비율로 섞으면 흐름 하나에 평균 약 2.9건이므로, 초당 5흐름이면 초당 약 14.5건이고 본 시험 2분 동안 약 1,750건이다.
+  - 준비 구간(풀 B 50명과 풀 C 몇 명의 접수와 조회, 100건 안팎)을 더하면 5분 창에 약 1,850건이다. 상한 2,400건 안에 들어가지만 여유가 크지 않으므로, smoke의 부하나 시간을 늘리려면 이 계산을 다시 해야 한다.
 - 입력 확인 단계는 WAF 예외가 없는 시나리오에서 태스크(IP)당 5분 요청 수를 계산하고, 2,400건(20% 여유)을 넘으면 멈춘다.
 
 **load**
@@ -221,9 +223,9 @@
 
 ## 저장소 보호
 
-- `.github/workflows/`, `.github/scripts/`, 그리고 `.github/CODEOWNERS` 자신을 CODEOWNERS에 넣는다. 워크플로를 바꾸면 OIDC로 맡는 역할을 다른 용도로 쓸 수 있고, CODEOWNERS를 바꾸면 리뷰 규칙을 풀 수 있기 때문이다.
+- `.github/workflows/`, 워크플로 규칙 검사(`tools/check-workflows/`), 그리고 `.github/CODEOWNERS` 자신을 CODEOWNERS에 넣는다. 워크플로를 바꾸면 OIDC로 맡는 역할을 다른 용도로 쓸 수 있고, CODEOWNERS를 바꾸면 리뷰 규칙을 풀 수 있기 때문이다.
 - 브랜치 보호에서 "코드 소유자 리뷰 필수"를 켠다. 이 설정이 꺼져 있으면 CODEOWNERS는 리뷰어를 지정할 뿐 머지를 막지 못한다.
-- `pull_request_target`은 쓰지 않는다. 이 이벤트는 fork에서 올린 PR에도 base 저장소의 권한과 비밀을 가지고 돈다. 공개 저장소에서는 누구나 PR을 올려 그 권한에 접근할 수 있다. 그래서 PR 검사는 `pull_request`로만 하고, `ci.yml`은 `permissions: contents: read`로 둔다. `ci.yml`의 워크플로 규칙 검사(`.github/scripts/check-workflows.sh`)가 `pull_request_target`을 찾으면 실패한다. actionlint는 이 이벤트를 막지 않으므로 규칙 검사를 따로 둔다.
+- `pull_request_target`은 쓰지 않는다. 이 이벤트는 fork에서 올린 PR에도 base 저장소의 권한과 비밀을 가지고 돈다. 공개 저장소에서는 누구나 PR을 올려 그 권한에 접근할 수 있다. 그래서 PR 검사는 `pull_request`로만 하고, `ci.yml`은 `permissions: contents: read`로 둔다. `ci.yml`의 워크플로 규칙 검사(`tools/check-workflows`)가 `pull_request_target`을 찾으면 실패한다. actionlint는 이 이벤트를 막지 않으므로 규칙 검사를 따로 둔다. 규칙 검사는 글자를 비교하지 않고 actionlint의 파서로 워크플로를 해석한 결과를 보므로, YAML 이스케이프(`"pull_request_\u0074arget"`)나 흐름 스타일(`- {uses: x@main}`)로 우회할 수 없다.
 - **`loadtest` environment는 인프라 PR I-2(IAM)를 적용하기 전에 만든다.** 승인자를 지정하고, 배포 브랜치는 main만 허용한다. 워크플로가 없는 environment를 참조하면 GitHub가 보호 규칙 없이 environment를 새로 만들어 버린다. 그 상태에서 시험 실행 역할이 생기면, 쓰기 권한이 있는 사람은 누구나 아무 브랜치에서 승인 없이 그 역할을 맡을 수 있다. 같은 이유로 main 브랜치 보호도 I-2 전에 켠다(빌드 역할은 main 브랜치를 신뢰한다).
 
 ## 시험 데이터

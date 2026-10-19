@@ -2,5 +2,5 @@
 /token-minter/       @UHeeJoon
 /config/             @UHeeJoon
 /.github/workflows/  @UHeeJoon
-/.github/scripts/    @UHeeJoon
+/tools/check-workflows/  @UHeeJoon
 /.github/CODEOWNERS  @UHeeJoon

@@ -16,11 +16,19 @@ index=$(mktemp)
 trap 'rm -f "$index"' EXIT
 
 cd "$repo"
-cp "$(git rev-parse --git-path index)" "$index"
+# 사용자의 인덱스를 복사하지 않고 HEAD 에서 새로 만든다. 무시 목록에 있는 파일을 강제로
+# 스테이징해 두었어도 미러에 섞이지 않는다.
+GIT_INDEX_FILE=$index git read-tree HEAD
 GIT_INDEX_FILE=$index git add -A
+if GIT_INDEX_FILE=$index git ls-files | grep -q '^local/\.data/'; then
+  echo "local/.data 가 커밋에 들어 있어 올리지 않는다" >&2
+  exit 1
+fi
 tree=$(GIT_INDEX_FILE=$index git write-tree)
 commit=$(git commit-tree "$tree" -p HEAD -m "local mirror of $(git rev-parse --short HEAD)")
 
-git -c http.extraHeader="Authorization: token $token" \
-  push --force "$url" "$commit:refs/heads/$branch"
+# 토큰이 프로세스 인자에 보이지 않게 환경 변수로 설정을 넘긴다
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+  GIT_CONFIG_VALUE_0="Authorization: token $token" \
+  git push --force "$url" "$commit:refs/heads/$branch"
 echo "올림: $commit -> $branch"

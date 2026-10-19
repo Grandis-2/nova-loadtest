@@ -10,8 +10,7 @@
 ```
 nova-loadtest/
 ├── .github/
-│   ├── CODEOWNERS               token-minter/, config/, .github/workflows/, .github/scripts/, .github/CODEOWNERS 는 담당자 리뷰 필수
-│   ├── scripts/                 워크플로 규칙 검사(pull_request_target, continue-on-error, 해시 고정)와 그 사례 시험
+│   ├── CODEOWNERS               token-minter/, config/, .github/workflows/, tools/check-workflows/, .github/CODEOWNERS 는 담당자 리뷰 필수
 │   └── workflows/
 │       ├── ci.yml               PR, main push: actionlint, 워크플로 규칙, 린트, 단위 테스트, k6 inspect, 이미지 빌드(푸시 없음), k6-safety
 │       ├── build.yml            main push: 이미지 3개 → ECR (커밋 해시, latest)
@@ -49,6 +48,8 @@ nova-loadtest/
 ├── token-minter/                토큰 발급기(제안: Go, distroless)
 │   ├── cmd/token-minter/
 │   └── internal/jwt/            클레임 고정(role=USER), 범위 검사, 서명
+├── tools/
+│   └── check-workflows/         워크플로 규칙 검사(Go, actionlint 파서). pull_request_target, continue-on-error, 해시로 고정하지 않은 uses 를 막는다
 ├── local/                       로컬 확인용(운영에 쓰지 않는다). 7절
 │   ├── compose.yml              Forgejo, 러너, dind, moto, fake-ecs, fake-mimir
 │   ├── forgejo/                 up.sh(띄우기, 계정과 러너 등록), mirror.sh(작업 트리 올리기), runner.yml
@@ -141,7 +142,7 @@ nova-loadtest/
 | 이미지 | distroless, 실행 파일 하나, 셸 없음 |
 
 - 시험 회원 `sub`는 회원 번호에서 계산한다: `10ad7e57-0000-7000-8000-<12자리 번호>`(be와 확정).
-- 단위 테스트는 시험용 키쌍으로 서명하고, be의 검증 규칙(필수 클레임 8개, `typ`, `kid`)대로 다시 검증해 본다. `kid`, `iss`, `aud`가 환경 변수 값과 같은지, 셋 중 하나가 비면 실패하는지도 본다.
+- 단위 테스트는 시험용 키쌍으로 서명하고, be의 검증 규칙(필수 클레임 `iss`, `aud`, `sub`, `sid`, `jti`, `role`, `type`, `iat`, `exp`와 헤더 `typ`, `kid`)대로 다시 검증해 본다. `kid`, `iss`, `aud`가 환경 변수 값과 같은지, 셋 중 하나가 비면 실패하는지도 본다.
 
 ### 2.4 컨트롤러 (`controller/`)
 
@@ -335,6 +336,8 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 - 확인한 것(2026-10-19, NV-656)
   - 빈 상태에서 `up.sh` 한 번으로 Forgejo, 러너, 저장소가 준비되고, main push와 PR(`pull_request`) 양쪽에서 `ci.yml`이 성공한다. 다시 실행해도 된다.
   - `pull_request_target`과 태그로 고정한 액션을 넣은 PR은 워크플로 규칙 검사에서 실패한다. actionlint는 이 PR을 통과시키므로 규칙 검사가 따로 필요하다.
+  - YAML 이스케이프(`"pull_request_\u0074arget"`)와 흐름 스타일(`- {uses: evil/action@main}`, `- {run: ..., continue-on-error: true}`)로 쓴 PR도 규칙 검사에서 실패한다.
+  - `local/.data`가 커밋에 들어 있으면 `mirror.sh`가 올리지 않는다.
   - `github.server_url`은 Forgejo의 `ROOT_URL`(`http://forgejo:3000`)로 채워진다. 7.4의 실행 위치 검사에 쓸 수 있다.
   - 미러에는 `local/.data`와 `CLAUDE.local.md`가 올라가지 않는다(`.gitignore`).
 - 로컬 Forgejo에는 비밀을 넣지 않는다. AWS 값은 moto용 가짜 값만 넣는다.

@@ -29,10 +29,13 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes=
 
+      # 오류 위치가 저장소 기준 경로로 찍히도록 저장소 루트에서 실행한다
       - name: 워크플로 규칙
         run: |
-          sh .github/scripts/check-workflows-test.sh
-          sh .github/scripts/check-workflows.sh
+          go vet -C tools/check-workflows ./...
+          go test -C tools/check-workflows ./...
+          go build -C tools/check-workflows -o "$RUNNER_TEMP/check-workflows" .
+          "$RUNNER_TEMP/check-workflows"
 
       # GitHub 과 로컬 Forgejo 중 어디서 돌았는지 남긴다(구현 계획 7.4)
       - name: 실행 위치

@@ -43,18 +43,29 @@ func Guard(getenv func(string) string) error {
 	return nil
 }
 
-// localURL 은 compose 안의 이름(점이 없는 호스트)이나 localhost, 사설 IP 인지 본다
+// lookupIP 는 테스트가 바꾼다
+var lookupIP = net.LookupIP
+
+// localURL 은 주소의 호스트가 루프백이나 사설 IP 로만 풀리는지 본다(compose 안의 이름도 풀어서 본다).
+// 이름만 보고 판단하면 점이 없는 이름이 외부 주소로 풀려도 통과한다.
 func localURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return false
 	}
 	h := u.Hostname()
-	if h == "localhost" || !strings.Contains(h, ".") {
-		return true
+	ips := []net.IP{net.ParseIP(h)}
+	if ips[0] == nil {
+		if ips, err = lookupIP(h); err != nil || len(ips) == 0 {
+			return false
+		}
 	}
-	ip := net.ParseIP(h)
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	for _, ip := range ips {
+		if !ip.IsLoopback() && !ip.IsPrivate() {
+			return false
+		}
+	}
+	return true
 }
 
 // TestID 는 시험 ID 다: lt-<UTC yyyymmddThhmm>-<run_number>. 소문자, 숫자, - 만 쓴다(RunTask startedBy, S3 경로, 태그)
@@ -102,7 +113,13 @@ func Inputs(getenv func(string) string) (plan.Input, error) {
 	}
 	num("INPUT_PEAK_RPS", func(f float64) { in.PeakRPS = f })
 	num("INPUT_ABORT_ERROR_RATE", func(f float64) { in.AbortErrorRate = f })
-	num("INPUT_RUNNERS", func(f float64) { in.Runners = int(f) })
+	if v := strings.TrimSpace(getenv("INPUT_RUNNERS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("runners %q 는 정수여야 한다", v))
+		}
+		in.Runners = n
+	}
 	if f := strings.TrimSpace(getenv("INPUT_FLOWS")); f != "" {
 		for _, x := range strings.Split(f, ",") {
 			if x = strings.TrimSpace(x); x != "" {

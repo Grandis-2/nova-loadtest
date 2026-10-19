@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,23 @@ import (
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
+// compose 안의 이름은 사설 IP 로, evil 은 외부 IP 로 풀린다
+func fakeLookup(t *testing.T) {
+	orig := lookupIP
+	lookupIP = func(h string) ([]net.IP, error) {
+		switch h {
+		case "moto", "fake-ecs":
+			return []net.IP{net.ParseIP("172.18.0.5")}, nil
+		case "evil":
+			return []net.IP{net.ParseIP("203.0.113.7")}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	t.Cleanup(func() { lookupIP = orig })
+}
+
 func TestGuard(t *testing.T) {
+	fakeLookup(t)
 	for _, tc := range []struct {
 		name string
 		env  map[string]string
@@ -39,6 +56,9 @@ func TestGuard(t *testing.T) {
 		{"로컬", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "http://moto:5000", "AWS_ENDPOINT_URL_ECS": "http://fake-ecs:8080", "CONTROLLER_INLINE": "1"}, true},
 		{"로컬인데 실제 AWS", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "http://moto:5000"}, false},
 		{"로컬인데 외부 주소", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "https://s3.amazonaws.com", "AWS_ENDPOINT_URL_ECS": "http://fake-ecs:8080"}, false},
+		{"점 없는 이름이 외부로 풀림", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "http://evil:5000", "AWS_ENDPOINT_URL_ECS": "http://fake-ecs:8080"}, false},
+		{"풀리지 않는 이름", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "http://nowhere:5000", "AWS_ENDPOINT_URL_ECS": "http://fake-ecs:8080"}, false},
+		{"루프백 IP", map[string]string{"GITHUB_SERVER_URL": "http://forgejo:3000", "AWS_ENDPOINT_URL": "http://127.0.0.1:5000", "AWS_ENDPOINT_URL_ECS": "http://10.0.0.2:8080"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := Guard(envOf(tc.env)); (err == nil) != tc.ok {
@@ -68,6 +88,9 @@ func TestInputs(t *testing.T) {
 	}
 	if _, err := Inputs(envOf(map[string]string{"INPUT_PEAK_RPS": "많이"})); err == nil {
 		t.Fatal("숫자가 아니면 실패해야 한다")
+	}
+	if _, err := Inputs(envOf(map[string]string{"INPUT_RUNNERS": "1.9"})); err == nil {
+		t.Fatal("태스크 대수가 정수가 아니면 실패해야 한다(1 로 줄이지 않는다)")
 	}
 }
 
@@ -317,5 +340,100 @@ func TestCheckTestID(t *testing.T) {
 		if err := CheckTestID(id); (err == nil) != ok {
 			t.Errorf("%q: %v", id, err)
 		}
+	}
+}
+
+// 컨트롤러가 summary.json 을 쓴 뒤 실패하면(종료 코드 1) 결과가 합격이어도 작업은 실패한다
+func TestRunControllerFailedAfterSummary(t *testing.T) {
+	f := newRun(t, `{"test_id":"lt-20261020t0600-1","scenario":"smoke","result":"pass"}`)
+	behave := f.ecs.Behave
+	f.ecs.Behave = func(family string, env map[string]string, n int) fakeecs.Behavior {
+		b := behave(family, env, n)
+		b.ExitCode = 1
+		return b
+	}
+	if err := Run(context.Background(), f.env, cfg(t)); err == nil || !strings.Contains(err.Error(), "종료 코드 1") {
+		t.Fatalf("컨트롤러가 실패했으면 작업도 실패해야 한다: %v", err)
+	}
+}
+
+// 상태 조회가 계속 실패하면 몇 시간 기다리지 않고 알린다
+type failingDescribe struct{ *fakeecs.Fake }
+
+func (failingDescribe) DescribeTasks(context.Context, *ecs.DescribeTasksInput, ...func(*ecs.Options)) (*ecs.DescribeTasksOutput, error) {
+	return nil, errors.New("AccessDenied")
+}
+
+func TestRunDescribeKeepsFailing(t *testing.T) {
+	f := newRun(t, "")
+	f.env.ECS = failingDescribe{f.ecs}
+	err := Run(context.Background(), f.env, cfg(t))
+	if err == nil || !strings.Contains(err.Error(), "AccessDenied") || !strings.Contains(f.out.String(), "상태 조회 실패") {
+		t.Fatalf("조회 오류를 알리고 그만둬야 한다: %v", err)
+	}
+}
+
+// 뒷정리는 관측 값이 없어도 태스크를 멈추고 토큰을 지운다
+func TestAfterWithoutObservability(t *testing.T) {
+	f := newRun(t, "")
+	f.env.SSM = fakeSSM{ParamRunTask: runTaskJSON}
+	f.s3.m["tokens/lt-20261020t0600-1/a-0.json"] = "[]"
+	if err := After(context.Background(), f.env, "lt-20261020t0600-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.s3.m["tokens/lt-20261020t0600-1/a-0.json"]; ok {
+		t.Fatal("토큰을 지워야 한다")
+	}
+}
+
+// AWS 를 부르는 명령은 모두 실행 위치를 본다
+func TestCommandsGuarded(t *testing.T) {
+	fakeLookup(t)
+	f := newRun(t, "")
+	f.vars["GITHUB_SERVER_URL"] = "http://forgejo:3000"
+	f.vars["AWS_ENDPOINT_URL"] = "https://ssm.ap-northeast-2.amazonaws.com"
+	for name, call := range map[string]func() error{
+		"after": func() error { return After(context.Background(), f.env, "lt-20261020t0600-1") },
+		"stop": func() error {
+			return Stop(context.Background(), f.env, "nova-prod-loadtest", "lt-20261020t0600-1", "nova-prod-loadtest-k6")
+		},
+		"idle": func() error { return Idle(context.Background(), f.env, "nova-prod-loadtest") },
+	} {
+		if err := call(); err == nil || !strings.Contains(err.Error(), "로컬 주소") {
+			t.Errorf("%s: 로컬이 아닌 AWS 주소를 거절해야 한다: %v", name, err)
+		}
+	}
+}
+
+// k6 를 띄우기 전(토큰 발급 중)에 멈추면 컨트롤러까지 멈춰 k6 가 뜨지 않게 한다
+func TestStopBeforeK6(t *testing.T) {
+	f := newRun(t, "")
+	f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: time.Second}
+	}
+	f.env.ECS.RunTask(context.Background(), runInput("nova-prod-loadtest-controller", "lt-20261020t0600-1"))
+	f.env.ECS.RunTask(context.Background(), runInput("nova-prod-loadtest-token-minter", "lt-20261020t0600-1"))
+	if err := Stop(context.Background(), f.env, "nova-prod-loadtest", "lt-20261020t0600-1", "nova-prod-loadtest-k6"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ecs.Stops) != 2 {
+		t.Fatalf("컨트롤러와 발급기를 멈춰야 한다: %v", f.ecs.Stops)
+	}
+	if err := Stop(context.Background(), f.env, "nova-prod-loadtest", "lt-20261020t0700-2", "nova-prod-loadtest-k6"); err == nil {
+		t.Fatal("태스크가 없는 시험이면 실패해야 한다")
+	}
+}
+
+// RUN_TASK 에 컨트롤러 항목이 없으면 RunTask 를 부르지 않는다
+func TestRunMissingController(t *testing.T) {
+	f := newRun(t, "")
+	i := strings.Index(runTaskJSON, `"controller"`)
+	j := strings.Index(runTaskJSON, `"tokenMinter"`)
+	f.env.SSM = fakeSSM{ParamRunTask: runTaskJSON[:i] + runTaskJSON[j:], ParamObservability: obsJSON}
+	if err := Run(context.Background(), f.env, cfg(t)); err == nil || !strings.Contains(err.Error(), "tasks.controller") {
+		t.Fatalf("컨트롤러 항목이 없으면 실패해야 한다: %v", err)
+	}
+	if len(f.ecs.Runs) != 0 {
+		t.Fatal("RunTask 를 부르지 않아야 한다")
 	}
 }

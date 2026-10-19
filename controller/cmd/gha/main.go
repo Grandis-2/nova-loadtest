@@ -69,6 +69,10 @@ func run(ctx context.Context, cmd string) error {
 		return gha.AppendFile(os.Getenv("GITHUB_OUTPUT"), fmt.Sprintf("test_id=%s\nplanned_at=%s\n", id, at))
 	}
 
+	// AWS 를 부르는 명령은 모두 실행 위치를 먼저 본다(로컬에서 실제 AWS 에 닿지 않게)
+	if err := gha.Guard(os.Getenv); err != nil {
+		return err
+	}
 	awsCfg, err := gha.AWSConfig(ctx, os.Getenv("AWS_ROLE_ARN"), "nova-loadtest-"+cmd)
 	if err != nil {
 		return err

@@ -8,6 +8,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 빌드끼리는 한 번에 하나씩, push 순서대로 돈다. 기다리던 빌드는 더 새 push 에 밀려 취소되므로
+# 오래된 커밋이 새 커밋의 latest 를 덮지 않는다
+concurrency:
+  group: build
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -57,13 +63,55 @@ jobs:
             docker buildx build --platform linux/amd64 -f "$IMAGE/Dockerfile" -t "$ref" --push .
           fi
 
+  # 세 이미지의 latest 를 한 작업에서 옮긴다. 이미지 하나라도 올리지 못했으면(needs) 옮기지 않는다
+  promote:
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_ROLE_ARN: ${{ secrets.AWS_BUILD_ROLE_ARN }}
+      LOADTEST_CLUSTER: nova-prod-loadtest
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: build gha
+        run: go build -o "$RUNNER_TEMP/gha" ./controller/cmd/gha
+
+      # 지난 실행을 다시 돌려도 오래된 커밋으로 latest 를 되돌리지 않는다
+      - name: main head
+        run: |
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/main | cut -f1)
+          if [ "$head" != "$SHA" ]; then
+            echo "::error::$SHA 는 main 의 마지막 커밋($head)이 아니다. latest 를 옮기지 않는다"
+            exit 1
+          fi
+
+      - name: ecr login
+        run: '"$RUNNER_TEMP/gha" ecr-login'
+
       - name: idle check
-        env:
-          LOADTEST_CLUSTER: nova-prod-loadtest
         run: '"$RUNNER_TEMP/gha" idle'
 
+      # 옮기는 데 몇 초 걸린다. 그 사이에 시험이 시작됐으면 이미지가 섞였을 수 있어 실패로 알린다
       - name: move latest
-        env:
-          SHA: ${{ github.sha }}
         run: |
-          docker buildx imagetools create -t "$REGISTRY/nova/loadtest-$IMAGE:latest" "$REGISTRY/nova/loadtest-$IMAGE:$SHA"
+          for image in token-minter k6 controller; do
+            repo="$REGISTRY/nova/loadtest-$image"
+            docker buildx imagetools create -t "$repo:latest" "$repo:$SHA"
+          done
+          "$RUNNER_TEMP/gha" idle || {
+            echo "::error::latest 를 옮기는 동안 시험이 시작됐다. 컨트롤러와 k6 의 이미지가 다를 수 있으니 그 시험을 stop.yml 로 멈추고 다시 돌린다"
+            exit 1
+          }

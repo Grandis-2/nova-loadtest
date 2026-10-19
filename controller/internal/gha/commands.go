@@ -69,14 +69,14 @@ func (e Env) param(ctx context.Context, name string) (string, error) {
 	return aws.ToString(out.Parameter.Value), nil
 }
 
-// readInfra 는 SSM 두 값을 읽고, 다른 무엇을 출력하기 전에 가린다.
-func (e Env) readInfra(ctx context.Context, mode infra.Mode) (string, string, *infra.RunTask, *infra.Observability, error) {
+// readInfra 는 SSM 값을 읽고, 다른 무엇을 출력하기 전에 가린다. 관측 값은 시험 실행(withObs)에서만 읽는다.
+func (e Env) readInfra(ctx context.Context, mode infra.Mode, withObs bool) (string, string, *infra.RunTask, *infra.Observability, error) {
 	rtRaw, err := e.param(ctx, ParamRunTask)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
 	obsRaw := ""
-	if mode == infra.ModeRun {
+	if withObs {
 		if obsRaw, err = e.param(ctx, ParamObservability); err != nil {
 			return "", "", nil, nil, err
 		}
@@ -93,7 +93,7 @@ func (e Env) readInfra(ctx context.Context, mode infra.Mode) (string, string, *i
 		return "", "", nil, nil, err
 	}
 	var obs *infra.Observability
-	if mode == infra.ModeRun {
+	if withObs {
 		if obs, err = infra.ParseObservability(obsRaw); err != nil {
 			return "", "", nil, nil, err
 		}
@@ -145,7 +145,7 @@ func Run(ctx context.Context, e Env, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("계획: %w", err)
 	}
-	rtRaw, obsRaw, rt, _, err := e.readInfra(ctx, infra.ModeRun)
+	rtRaw, obsRaw, rt, _, err := e.readInfra(ctx, infra.ModeRun, true)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,10 @@ func Run(ctx context.Context, e Env, cfg *config.Config) error {
 // controller 는 컨트롤러를 띄우고 끝날 때까지 기다린 뒤 종료 코드를 돌려준다.
 // 로컬 Forgejo 에서는 컨테이너를 띄울 수 없으므로 실행 파일을 바로 돌린다(CONTROLLER_INLINE=1).
 func (e Env) controller(ctx context.Context, rt *infra.RunTask, startedBy string, env []runner.Env) (int, error) {
-	t := rt.Tasks["controller"]
+	t, err := rt.Task("controller")
+	if err != nil {
+		return 0, err
+	}
 	if n := runner.OverrideSize(t.Container, env); n > runner.MaxOverrideBytes {
 		return 0, fmt.Errorf("컨트롤러 덮어쓰기가 %d바이트로 RunTask 상한 %d바이트를 넘는다(계획을 줄인다)", n, runner.MaxOverrideBytes)
 	}
@@ -207,10 +210,18 @@ func (e Env) controller(ctx context.Context, rt *infra.RunTask, startedBy string
 	}
 	e.printf("컨트롤러를 띄웠다: %s", arn)
 	logs := logTail{logs: e.Logs, group: "/ecs/" + rt.Cluster, stream: t.Container + "/" + t.Container + "/" + taskID(arn)}
+	failures := 0
 	for {
 		logs.flush(ctx, e)
 		states, err := r.Describe(ctx, []string{arn}, t.Container)
-		if err == nil && states[0].LastStatus == "STOPPED" {
+		if err != nil {
+			// 잠깐의 오류는 넘기고, 5분 넘게 이어지면 기다리기를 그만둔다(뒷정리가 태스크를 멈춘다)
+			failures++
+			e.printf("::warning::컨트롤러 상태 조회 실패(%d번째): %v", failures, err)
+			if failures >= 15 {
+				return 0, fmt.Errorf("컨트롤러 상태를 5분 넘게 보지 못했다: %w", err)
+			}
+		} else if failures = 0; states[0].LastStatus == "STOPPED" {
 			logs.flush(ctx, e)
 			if c := states[0].ExitCode; c != nil {
 				return int(*c), nil
@@ -268,6 +279,11 @@ func (e Env) report(ctx context.Context, rt *infra.RunTask, testID string, code 
 	if err := AppendFile(e.Getenv("GITHUB_STEP_SUMMARY"), s.Markdown("")); err != nil {
 		return err
 	}
+	if code != 0 {
+		// summary.json 을 쓴 뒤에 실패했다(summary.md 쓰기, 토큰 지우기). 결과가 합격이어도 성공으로 두지 않는다
+		e.slack(ctx, testID, fmt.Sprintf("%s: %s, 그러나 컨트롤러가 종료 코드 %d 로 끝났다", s.Scenario, s.Result, code))
+		return fmt.Errorf("결과 %s 를 남겼지만 컨트롤러가 종료 코드 %d 로 끝났다(컨트롤러 로그를 본다)", s.Result, code)
+	}
 	e.slack(ctx, testID, fmt.Sprintf("%s: %s %s", s.Scenario, s.Result, s.Reason))
 	if !s.Result.Success() {
 		return fmt.Errorf("결과 %s: %s", s.Result, s.Reason)
@@ -311,7 +327,11 @@ func After(ctx context.Context, e Env, testID string) error {
 	if testID == "" {
 		return nil // plan 작업이 시험 ID 를 정하기 전에 끝났다
 	}
-	_, _, rt, _, err := e.readInfra(ctx, infra.ModeRun)
+	if err := Guard(e.Getenv); err != nil {
+		return err
+	}
+	// 태스크를 멈추고 토큰을 지우는 데는 클러스터와 버킷만 있으면 된다. 관측 값이 틀려도 뒷정리는 한다
+	_, _, rt, _, err := e.readInfra(ctx, infra.ModeRun, false)
 	if err != nil {
 		return err
 	}
@@ -354,10 +374,16 @@ func Stop(ctx context.Context, e Env, cluster, testID, k6Family string) error {
 	if err := CheckTestID(testID); err != nil {
 		return err
 	}
+	if err := Guard(e.Getenv); err != nil {
+		return err
+	}
 	r := &runner.Runner{ECS: e.ECS, Cluster: cluster, Clock: e.Clock}
 	arns, err := r.ListStartedBy(ctx, testID)
 	if err != nil {
 		return err
+	}
+	if len(arns) == 0 {
+		return fmt.Errorf("시험 %s 의 태스크가 없다", testID)
 	}
 	states, err := r.Describe(ctx, arns, "")
 	if err != nil {
@@ -370,7 +396,10 @@ func Stop(ctx context.Context, e Env, cluster, testID, k6Family string) error {
 		}
 	}
 	if len(k6) == 0 {
-		return fmt.Errorf("시험 %s 의 k6 태스크가 없다", testID)
+		// 아직 k6 를 띄우기 전이다(토큰 발급 중). 컨트롤러까지 멈춰 k6 가 뜨지 않게 한다.
+		// 결과는 남지 않으므로 loadtest.yml 은 판정 불가로 끝나고, 뒷정리가 토큰을 지운다
+		e.printf("k6 태스크가 아직 없다. 컨트롤러와 발급기 %d대를 멈춘다", len(arns))
+		return r.Stop(ctx, arns, "stop.yml(k6 시작 전)")
 	}
 	e.printf("k6 태스크 %d대를 멈춘다", len(k6))
 	return r.Stop(ctx, k6, "stop.yml")
@@ -384,7 +413,7 @@ func Cleanup(ctx context.Context, e Env, testID string) error {
 	if err := Guard(e.Getenv); err != nil {
 		return err
 	}
-	rtRaw, _, rt, _, err := e.readInfra(ctx, infra.ModeCleanup)
+	rtRaw, _, rt, _, err := e.readInfra(ctx, infra.ModeCleanup, false)
 	if err != nil {
 		return err
 	}
@@ -413,6 +442,9 @@ func Cleanup(ctx context.Context, e Env, testID string) error {
 // Idle 은 build.yml 이 latest 를 옮기기 전에 시험 클러스터에 도는 태스크가 없는지 본다.
 // 남는 틈(이 확인 뒤에 시험이 시작되는 경우)은 컨트롤러가 k6 이미지 다이제스트를 비교해 막는다.
 func Idle(ctx context.Context, e Env, cluster string) error {
+	if err := Guard(e.Getenv); err != nil {
+		return err
+	}
 	r := &runner.Runner{ECS: e.ECS, Cluster: cluster, Clock: e.Clock}
 	arns, err := r.ListRunning(ctx)
 	if err != nil {

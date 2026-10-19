@@ -111,18 +111,29 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 		}
 	}()
 
-	now := d.Clock.Now()
-	startAt := p.StartAt(r.Config, now)
-	if startAt.Before(now.Add(minLeadTime)) {
-		return finish(report.Canceled, fmt.Sprintf("시작 시각 %s가 너무 가깝다(태스크가 뜰 시간이 없다)", startAt.Format(time.RFC3339)))
+	// open_at 이 있으면 시작 시각이 정해져 있다. 토큰을 만들기 전에 이미 촉박하면 바로 취소한다
+	tooClose := func() string {
+		now := d.Clock.Now()
+		if at := p.StartAt(r.Config, now); at.Before(now.Add(minLeadTime)) {
+			return fmt.Sprintf("시작 시각 %s가 너무 가깝다(태스크가 뜰 시간이 없다)", at.Format(time.RFC3339))
+		}
+		return ""
 	}
-	s.StartAt = startAt
-
+	if reason := tooClose(); reason != "" {
+		return finish(report.Canceled, reason)
+	}
 	if p.Members != nil {
 		if reason := mintTokens(ctx, d, r, p); reason != "" {
 			return finish(report.Canceled, reason)
 		}
+		// 토큰 발급은 별도 Fargate 태스크라 몇 분 걸릴 수 있다. 시작 시각은 발급이 끝난 뒤에 정한다.
+		// open_at 이 있으면 시작 시각은 그대로이므로 남은 시간을 다시 본다
+		if reason := tooClose(); reason != "" {
+			return finish(report.Canceled, "토큰을 만드는 동안 "+reason)
+		}
 	}
+	startAt := p.StartAt(r.Config, d.Clock.Now())
+	s.StartAt = startAt
 
 	arns, reason := launchK6(ctx, d, r, p, startAt)
 	if reason != "" {
@@ -153,12 +164,24 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 		}
 		return finish(report.Aborted, outcome.reason)
 	}
-	ws, why := judge(ctx, d, r.Config, p, startAt, outcome.at)
+	// 끝까지 돌았으면(끝 시각 30초 전 안에 끝난 것 포함) 계획한 구간을 모두 판정한다. 빠진 지표는 구간 누락으로 걸린다
+	plannedEnd := startAt.Add(time.Duration(p.MainEnd) * time.Second)
+	ws, why := judge(ctx, d, r.Config, p, startAt, latest(outcome.at, plannedEnd))
 	if why != "" {
 		return finish(report.Inconclusive, why)
 	}
+	if len(ws) != len(p.Windows) {
+		return finish(report.Inconclusive, fmt.Sprintf("판정 구간 %d개 중 %d개만 판정했다", len(p.Windows), len(ws)))
+	}
 	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
 	return finish(judgment(p, ws))
+}
+
+func latest(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func jsonEqual(a, b []byte) bool {
@@ -342,6 +365,11 @@ func waitRunning(ctx context.Context, d Deps, r Run, arns []string, startAt time
 				if s.LastStatus == "STOPPED" {
 					return fmt.Sprintf("k6 태스크가 시작 전에 멈췄다(%s)", s.StoppedReason)
 				}
+			}
+			if running == len(arns) && !d.Clock.Now().Before(startAt) {
+				// 시작 시각이 지난 뒤에야 모두 떴다. k6-runner 는 지난 시작 시각을 "바로 시작"으로 받으므로
+				// 태스크마다 시작 시각이 어긋난다
+				return fmt.Sprintf("시작 시각 %s가 지난 뒤에야 k6 태스크가 모두 RUNNING 이 되었다", startAt.Format(time.RFC3339))
 			}
 			if running == len(arns) {
 				// 시험 도중 build.yml 이 latest 를 옮기면 태스크마다 이미지가 다를 수 있다

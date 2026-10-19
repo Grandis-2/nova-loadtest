@@ -549,3 +549,52 @@ func TestAbortRecordsExitCodes(t *testing.T) {
 		}
 	}
 }
+
+// 토큰 발급이 몇 분 걸려도 시작 시각은 발급이 끝난 뒤에 정하므로 취소되지 않는다
+func TestSlowMinterStillRuns(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	behave := f.ecs.Behave
+	f.ecs.Behave = func(family string, env map[string]string, n int) fakeecs.Behavior {
+		if family == minter {
+			return fakeecs.Behavior{RunningAfter: time.Minute, ExitAt: f.clock.Now().Add(3 * time.Minute), ExitCode: 0}
+		}
+		return behave(family, env, n)
+	}
+	s := f.execute(t)
+	expect(t, s, report.Pass, "")
+	if !s.StartAt.After(t0.Add(3 * time.Minute)) {
+		t.Fatalf("시작 시각 %s는 발급이 끝난 뒤여야 한다", s.StartAt)
+	}
+}
+
+// 시작 시각이 지난 뒤에야 모두 RUNNING 이 되면 취소한다(k6 가 태스크마다 어긋난 시각에 바로 시작한다)
+func TestRunningAfterStartAtCancels(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	arn, err := f.deps.Runner.Run(context.Background(), f.run.RunTask.Tasks["k6"], testID, []runner.Env{{Name: "START_AT", Value: t0.Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Sleep(context.Background(), 5*time.Minute) // 모두 RUNNING 이지만 시작 시각이 지났다
+	reason := waitRunning(context.Background(), f.deps, f.run, []string{arn}, t0.Add(2*time.Minute))
+	if !strings.Contains(reason, "지난 뒤에야") {
+		t.Fatalf("시작 시각이 지났으면 취소해야 한다: %q", reason)
+	}
+}
+
+// stress 태스크가 끝 시각 조금 전에 정상 종료해도 마지막 단계까지 판정한다
+func TestStressEarlyNormalExitJudgesAllSteps(t *testing.T) {
+	f := newFixture(t, "stress", nil)
+	behave := f.ecs.Behave
+	f.ecs.Behave = func(family string, env map[string]string, n int) fakeecs.Behavior {
+		b := behave(family, env, n)
+		if family == k6fam {
+			start, _ := time.Parse(time.RFC3339, env["START_AT"])
+			b.ExitAt = start.Add(time.Duration(f.plan.MainEnd)*time.Second - 20*time.Second)
+		}
+		return b
+	}
+	s := f.execute(t)
+	if len(s.Windows) != 5 || s.LastPassingStep != "step5" {
+		t.Fatalf("다섯 단계를 모두 판정해야 한다: %d %q (%s %s)", len(s.Windows), s.LastPassingStep, s.Result, s.Reason)
+	}
+}

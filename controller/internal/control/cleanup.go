@@ -132,7 +132,9 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 		{Name: "PRODUCT_IDS", Value: strings.Join(products, ",")},
 		{Name: "MEMBERS", Value: string(members)},
 	}
-	arn, err := d.Runner.Run(ctx, data, selfStartedBy, env)
+	// 정리 태스크는 컨트롤러와 다른 startedBy(<시험 ID>-d)로 띄운다. 정리를 다시 실행했을 때 먼저 띄운
+	// 정리 태스크를 "자기 것"으로 보고 지나치지 않게 한다
+	arn, err := d.Runner.Run(ctx, data, DataStartedBy(testID), env)
 	if err != nil {
 		return done(false, "정리 태스크를 띄우지 못했다: "+err.Error())
 	}
@@ -153,7 +155,11 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 	return done(false, fmt.Sprintf("정리 태스크가 %s 안에 끝나지 않아 멈췄다", dataTaskTimeout))
 }
 
-// otherTest 는 이 컨트롤러 말고 시험 클러스터에서 도는 태스크가 있으면 그 startedBy 를 돌려준다
+// DataStartedBy 는 정리 태스크의 startedBy 다.
+func DataStartedBy(testID string) string { return testID + "-d" }
+
+// otherTest 는 이 컨트롤러 말고 시험 클러스터에서 도는 태스크가 있으면 그 startedBy 를 돌려준다.
+// 같은 시험의 정리 태스크(<시험 ID>-d)가 돌고 있어도 돌려준다(정리를 두 번 돌리지 않는다)
 func otherTest(ctx context.Context, d Deps, self string) (string, error) {
 	arns, err := d.Runner.ListRunning(ctx)
 	if err != nil || len(arns) == 0 {

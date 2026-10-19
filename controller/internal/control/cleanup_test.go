@@ -56,8 +56,8 @@ func TestCleanup(t *testing.T) {
 		t.Fatalf("정리해야 한다: %v %+v", err, res)
 	}
 	runs := f.ecs.RunsOf(dataFam)
-	if len(runs) != 1 || runs[0].StartedBy != self {
-		t.Fatalf("정리 태스크를 <시험 ID>-c 로 한 번 띄워야 한다: %+v", runs)
+	if len(runs) != 1 || runs[0].StartedBy != DataStartedBy(testID) {
+		t.Fatalf("정리 태스크를 <시험 ID>-d 로 한 번 띄워야 한다: %+v", runs)
 	}
 	if ids := runs[0].Env["PRODUCT_IDS"]; !strings.Contains(ids, product) || !strings.Contains(ids, "a1b2c3d4-0000-4000-8000-000000000002") {
 		t.Fatalf("spike 는 진입 상품과 준비 상품을 모두 정리한다: %s", ids)
@@ -161,5 +161,18 @@ func TestCleanupDataTaskTimeout(t *testing.T) {
 	}
 	if len(f.ecs.Stops) != 1 {
 		t.Fatal("끝나지 않은 정리 태스크를 멈춰야 한다")
+	}
+}
+
+// 같은 시험의 정리 태스크가 이미 돌고 있으면(정리를 다시 실행) 두 번 돌리지 않는다
+func TestCleanupAlreadyRunning(t *testing.T) {
+	f, self := cleanupFixture(t)
+	f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: time.Second}
+	}
+	f.deps.Runner.Run(context.Background(), f.run.RunTask.Tasks["data"], DataStartedBy(testID), nil)
+	_, err := Cleanup(context.Background(), f.deps, fakeQueues{}, f.run.Config, f.run.RunTask, testID, self)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), DataStartedBy(testID)) {
+		t.Fatalf("먼저 띄운 정리 태스크가 돌면 거절해야 한다: %v", err)
 	}
 }

@@ -127,6 +127,7 @@ sequenceDiagram
 | `ramp_up` | 시나리오 기본값 | 최대치까지 올리는 시간(예: load `1m`, spike `10s`) |
 | `runners` | 자동 | k6 태스크 대수. 비워 두면 태스크 하나가 초당 1,000건을 맡는다고 보고 계산한다. 이 값은 smoke와 load에서 실측한 뒤 고친다 |
 | `abort_error_rate` | `5` | 오류율이 이 값(%)을 1분 넘게 넘으면 시험을 멈춘다 |
+| `flows` | 모두 | 돌릴 흐름(쉼표로 구분). 첫 smoke는 `catalog`만 넣어 토큰, 회원, 시험 상품 없이 돌린다 |
 
 터미널에서는 `gh workflow run loadtest.yml -f scenario=spike -f product_id=<id> -f prep_product_id=<id> -f open_at=<UTC 시각> -f peak_rps=500`처럼 실행할 수 있다.
 

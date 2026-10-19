@@ -44,3 +44,46 @@ jobs:
         run: |
           echo "실행 위치: ${SERVER_URL}"
           echo "실행 위치: \`${SERVER_URL}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # Go 코드(계획 계산, 토큰 발급기, 이후 컨트롤러)의 형식, vet, 단위 테스트
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt 를 하지 않은 파일: $unformatted"
+            exit 1
+          fi
+
+      - name: vet, test
+        run: |
+          go vet ./...
+          go test ./...
+
+  # 이미지를 linux/amd64 로 빌드만 한다(올리지 않는다). 로컬 Forgejo 러너에는 Docker 소켓을 주지 않으므로 GitHub 에서만 돈다
+  image-build:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [token-minter]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: build
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: docker buildx build --platform linux/amd64 -f "$IMAGE/Dockerfile" -t "nova-loadtest/$IMAGE:ci" .

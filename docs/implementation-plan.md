@@ -17,8 +17,10 @@ nova-loadtest/
 │       ├── loadtest.yml         수동: 입력 확인 → 승인 → 컨트롤러 → 결과 → 뒷정리
 │       ├── stop.yml             수동: 시험 ID 의 k6 태스크 중지
 │       └── cleanup.yml          수동(승인): 회차 마감 뒤 시험 ID 의 시험 데이터 정리
+├── go.mod                       Go 모듈 하나(config, controller, token-minter). tools/check-workflows 는 따로
 ├── config/
-│   └── scenarios.yml            시나리오 기본값, 상한, 흐름 비율, 회원 ID 범위. 유일한 출처
+│   ├── scenarios.yml            시나리오 기본값, 상한, 흐름 비율, 회원 ID 범위. 유일한 출처
+│   └── config.go                scenarios.yml 을 실행 파일에 넣고(go:embed) 읽고 검사한다
 ├── k6/
 │   ├── Dockerfile               linux/amd64. grafana/k6:2.3.0 의 k6 실행 파일 + k6-runner (distroless)
 │   ├── main.js                  PLAN_JSON 을 읽어 시나리오(흐름별 실행기)를 만든다
@@ -33,7 +35,7 @@ nova-loadtest/
 │           ├── cancel.js        예약 취소(풀 C)
 │           ├── order.js         주문 생성 → 결제 시도
 │           └── catalog.js       상품 조회
-├── controller/                  컨트롤러(제안: Go)
+├── controller/                  컨트롤러(Go)
 │   ├── cmd/controller/          태스크 진입점
 │   ├── cmd/plan/                입력 확인. 러너도 이 명령으로 계획을 계산한다
 │   ├── cmd/gha/                 러너에서 도는 명령: 컨트롤러 띄우고 기다리기(OIDC 세션 갱신), 결과 정리, 뒷정리, 중지
@@ -45,9 +47,12 @@ nova-loadtest/
 │       ├── runner/              RunTask(startedBy=시험 ID, tags 없음), 시작 대기, 중지
 │       ├── mimir/               obs 태스크 IP 찾기, PromQL 조회, 중단 기준, 판정
 │       └── report/              summary.json, summary.md
-├── token-minter/                토큰 발급기(제안: Go, distroless)
-│   ├── cmd/token-minter/
-│   └── internal/jwt/            클레임 고정(role=USER), 범위 검사, 서명
+├── token-minter/                토큰 발급기(Go, distroless)
+│   ├── Dockerfile
+│   ├── cmd/token-minter/        환경 변수를 읽어 토큰 파일을 S3 에 올린다
+│   └── internal/
+│       ├── jwt/                 서명키 읽기(PKCS#8, RSA 2048 이상), 클레임 고정(role=USER, type=ACCESS), RS256 서명
+│       └── mint/                회원 범위 검사, 태스크 수만큼 나누기, 토큰 파일 만들기
 ├── tools/
 │   └── check-workflows/         워크플로 규칙 검사(Go, actionlint 파서). pull_request_target, continue-on-error, 해시로 고정하지 않은 uses 를 막는다
 ├── local/                       로컬 확인용(운영에 쓰지 않는다). 7절
@@ -133,7 +138,7 @@ nova-loadtest/
 
 | 항목 | 내용 |
 |---|---|
-| 입력 | 시험 ID, 회원 번호 범위(풀 A, B, C), 태스크 수 N, 유효 시간 |
+| 입력 | 시험 ID, 회원 번호 범위(풀 A, B, C), 태스크 수 N, 유효 시간. 환경 변수 이름은 [설정과 비밀 값](configuration.md#컨트롤러가-토큰-발급기에-넘기는-값runtask-덮어쓰기)에 있다 |
 | 출력 | S3 `tokens/<test_id>/{a,b,c}-<i>.json`. 원소는 `{n, sub, token}` |
 | 고정 | `role=USER`, `type=ACCESS`, `typ=at+jwt`. 입력으로 바꿀 수 없다 |
 | 작업 정의 값 | `JWT_KEY_ID`(헤더 `kid`에 그대로, 개인키에서 계산하지 않는다), `JWT_ISSUER`(`iss`), `JWT_AUDIENCE`(`aud`). 인프라가 member 설정에서 읽어 넣는다. 하나라도 비면 시작하자마자 실패한다. 컨트롤러는 이 값을 덮어쓰지 않는다 |
@@ -251,8 +256,8 @@ nova-infra의 "PR 하나에 층 하나" 규칙을 따른다. 층 번호는 `atla
 | 작업 정의 | 크기 | 네트워크 | 설정 |
 |---|---|---|---|
 | 공통 | | | `runtimePlatform` X86_64 / LINUX |
-| k6 | 4 vCPU, 8GB | public 서브넷, `assignPublicIp=ENABLED` | `stopTimeout` 120, `ulimits nofile` 250000, `secrets` 부하 시험 헤더. OTel 고정값(전송 방식, 평문, 서비스 이름, 지표 접두사). 수집 주소는 컨트롤러가 넣는다 |
-| 컨트롤러 | 0.5 vCPU, 1GB | app 서브넷 | SSM 값(버킷 이름 포함)은 워크플로가 RunTask 덮어쓰기로 넘긴다. 태스크 역할에 SSM 권한은 없다 |
+| k6 | 4 vCPU, 8GB | public 서브넷, `assignPublicIp=ENABLED` | `stopTimeout` 120, `ulimits nofile` 65536, `secrets` 부하 시험 헤더. OTel 고정값(전송 방식, 평문, 서비스 이름, 지표 접두사). 수집 주소는 컨트롤러가 넣는다 |
+| 컨트롤러 | 0.25 vCPU, 512MB | app 서브넷 | SSM 값(버킷 이름 포함)은 워크플로가 RunTask 덮어쓰기로 넘긴다. 태스크 역할에 SSM 권한은 없다 |
 | 발급기 | 0.5 vCPU, 1GB | app 서브넷 | 전용 실행 역할, `secrets` 서명키, 환경 변수 `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`(member 설정에서) |
 
 ## 4. be에 요청할 것

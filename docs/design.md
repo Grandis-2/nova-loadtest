@@ -26,7 +26,7 @@
 - 같은 시간에는 시험을 하나만 돌린다(`concurrency`). 진행 중인 시험을 취소하지는 않는다.
 - **시험 ID**는 `lt-<UTC yyyymmddThhmm>-<run_number>` 형식이다(예: `lt-20261017t0630-12`). 소문자, 숫자, `-`만 쓴다. 이 값을 RunTask의 `startedBy`(36자 이하, 영문·숫자·`-`·`_`), k6의 `test_id` 태그, User-Agent, S3 경로에 그대로 쓰기 때문에, 모든 곳에서 허용되는 글자만 골랐다.
 - AWS에는 OIDC로 맡는 역할로 접근한다. 세션은 1시간인데, 컨트롤러를 기다리는 단계 하나가 몇 시간씩 걸릴 수 있다. 단계 안에서는 `configure-aws-credentials`를 다시 부를 수 없으므로, 기다리는 Go 명령이 50분마다 Actions OIDC 토큰을 새로 받아 `AssumeRoleWithWebIdentity`로 세션을 바꾼다.
-- **OIDC 신뢰 조건**: 작업이 `loadtest` environment를 쓰면 OIDC 토큰의 `sub`가 `repo:<저장소>:environment:loadtest`로 바뀐다. 그래서 브랜치 조건(`ref:refs/heads/main`)만으로는 역할을 맡을 수 없다.
+- **OIDC 신뢰 조건**: 작업이 `loadtest` environment를 쓰면 OIDC 토큰의 `sub`가 `repo:<저장소>:environment:loadtest`로 바뀐다. 이 저장소는 immutable subject 형식이라 `<저장소>`가 `Grandis-2@<ID>/nova-loadtest@<ID>`이다([설정과 비밀 값](configuration.md#oidc-신뢰-조건)). 그래서 브랜치 조건(`ref:refs/heads/main`)만으로는 역할을 맡을 수 없다.
   - 시험 실행 역할은 environment 값을 신뢰한다. main에서만 돌게 하는 제한은 environment의 배포 브랜치 규칙이 맡는다.
   - `build.yml`, `stop.yml`, 그리고 `loadtest.yml`의 입력 확인 작업은 environment 없이 main 조건으로 빌드 역할을 맡는다.
 - 태스크는 `latest` 이미지로 돈다. RunTask로는 이미지를 바꿀 수 없기 때문이다. 대신 결과에 이미지 다이제스트와 커밋을 남긴다. 시험 중에 `latest`가 바뀌지 않게 하는 방법은 아래 "인프라 값"에 있다.

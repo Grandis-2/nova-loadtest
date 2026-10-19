@@ -1,0 +1,12 @@
+# 공개 저장소라 비밀과 시험 결과는 올리지 않는다
+.env
+*.env
+tokens*.json
+users*.csv
+results/
+summary*.json
+node_modules/
+.DS_Store
+
+# 개인 작업 메모
+CLAUDE.local.md

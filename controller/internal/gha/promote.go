@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -36,7 +37,12 @@ func Promote(ctx context.Context, c ECR, repos []string, sha string) error {
 			return fmt.Errorf("%s:%s 매니페스트: %w", repo, sha, err)
 		}
 		if len(out.Images) != 1 {
-			return fmt.Errorf("%s:%s 이미지가 없다(%d개)", repo, sha, len(out.Images))
+			// 이미지가 없으면 ECR 은 성공 응답의 failures 에 까닭을 담는다(예: ImageNotFound)
+			var reasons []string
+			for _, f := range out.Failures {
+				reasons = append(reasons, fmt.Sprintf("%s: %s", f.FailureCode, aws.ToString(f.FailureReason)))
+			}
+			return fmt.Errorf("%s:%s 이미지가 %d개다(%s)", repo, sha, len(out.Images), strings.Join(reasons, "; "))
 		}
 		images = append(images, image{repo, aws.ToString(out.Images[0].ImageManifest), aws.ToString(out.Images[0].ImageManifestMediaType)})
 	}

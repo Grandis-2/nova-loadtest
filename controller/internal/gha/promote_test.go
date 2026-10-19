@@ -3,6 +3,7 @@ package gha
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,6 +28,8 @@ func (f *fakeECR) BatchGetImage(_ context.Context, in *ecr.BatchGetImageInput, _
 	key := aws.ToString(in.RepositoryName) + ":" + aws.ToString(in.ImageIds[0].ImageTag)
 	if m, ok := f.images[key]; ok {
 		out.Images = []ecrtypes.Image{{ImageManifest: aws.String(m), ImageManifestMediaType: aws.String(indexType)}}
+	} else {
+		out.Failures = []ecrtypes.ImageFailure{{FailureCode: ecrtypes.ImageFailureCodeImageNotFound, FailureReason: aws.String("Requested image not found")}}
 	}
 	return out, nil
 }
@@ -66,8 +69,9 @@ func TestPromote(t *testing.T) {
 // 한 저장소라도 커밋 태그가 없으면 아무것도 옮기지 않는다(이미지가 섞이지 않게)
 func TestPromoteMissingImage(t *testing.T) {
 	f := &fakeECR{images: map[string]string{Repos[0] + ":abc": "m0", Repos[1] + ":abc": "m1"}}
-	if err := Promote(context.Background(), f, Repos, "abc"); err == nil {
-		t.Fatal("커밋 태그가 없는 저장소가 있으면 실패해야 한다")
+	err := Promote(context.Background(), f, Repos, "abc")
+	if err == nil || !strings.Contains(err.Error(), "ImageNotFound: Requested image not found") {
+		t.Fatalf("ECR 의 까닭을 담아 실패해야 한다: %v", err)
 	}
 	if len(f.puts) != 0 {
 		t.Fatalf("아무것도 옮기지 않아야 한다: %v", f.puts)

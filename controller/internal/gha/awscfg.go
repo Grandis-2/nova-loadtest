@@ -3,6 +3,7 @@ package gha
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -48,6 +49,18 @@ func (g githubToken) GetIdentityToken() ([]byte, error) {
 	return []byte(body.Value), nil
 }
 
+// credentialSource 는 기본 자격 증명(러너에 있는 자격 증명)으로 넘어가지 않게 막는다.
+// GitHub 에서는 역할 ARN 이 있어야 하고, 역할 ARN 을 받았으면 OIDC 로만 맡는다.
+func credentialSource(server, roleARN, reqURL string) error {
+	if server == githubURL && roleARN == "" {
+		return errors.New("AWS_ROLE_ARN 이 비었다(GitHub 비밀 AWS_RUN_ROLE_ARN, AWS_BUILD_ROLE_ARN 을 본다)")
+	}
+	if roleARN != "" && reqURL == "" {
+		return errors.New("역할을 맡을 OIDC 토큰이 없다(작업에 permissions: id-token: write 가 있는지 본다)")
+	}
+	return nil
+}
+
 // AWSConfig 는 AWS 설정이다. Actions OIDC 가 있고 역할 ARN 을 받으면 그 역할을 맡는다.
 //
 // 세션은 1시간인데 컨트롤러를 기다리는 단계 하나가 몇 시간 걸릴 수 있다. 단계 안에서는 configure-aws-credentials 를
@@ -59,8 +72,11 @@ func AWSConfig(ctx context.Context, roleARN, sessionName string) (aws.Config, er
 		return cfg, err
 	}
 	reqURL, bearer := os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"), os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-	if roleARN == "" || reqURL == "" {
-		return cfg, nil
+	if err := credentialSource(os.Getenv("GITHUB_SERVER_URL"), roleARN, reqURL); err != nil {
+		return cfg, err
+	}
+	if roleARN == "" {
+		return cfg, nil // 로컬 Forgejo: moto 용 가짜 자격 증명
 	}
 	tok := githubToken{url: reqURL, bearer: bearer, client: &http.Client{Timeout: 30 * time.Second}}
 	p := stscreds.NewWebIdentityRoleProvider(sts.NewFromConfig(cfg), roleARN, tok, func(o *stscreds.WebIdentityRoleOptions) {

@@ -309,7 +309,11 @@ func (e Env) slack(ctx context.Context, testID, text string) {
 	}
 	run := e.Getenv("GITHUB_SERVER_URL") + "/" + e.Getenv("GITHUB_REPOSITORY") + "/actions/runs/" + e.Getenv("GITHUB_RUN_ID")
 	body, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("부하 시험 %s %s\n%s", testID, text, run)})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, hook, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hook, bytes.NewReader(body))
+	if err != nil {
+		e.printf("::warning::Slack 웹훅 주소가 틀렸다")
+		return
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.HTTP.Do(req)
 	if err != nil {
@@ -391,6 +395,10 @@ func Stop(ctx context.Context, e Env, cluster, testID, k6Family string) error {
 	}
 	var k6 []string
 	for _, s := range states {
+		if s.LastStatus == runner.Missing {
+			// 작업 정의를 모르면 k6 인지 알 수 없다. 컨트롤러까지 멈추지 않도록 다시 돌리게 한다
+			return fmt.Errorf("태스크 %s 가 아직 조회되지 않는다. 잠시 뒤 다시 돌린다", s.ARN)
+		}
 		if strings.Contains(s.TaskDef, k6Family) {
 			k6 = append(k6, s.ARN)
 		}
@@ -426,11 +434,16 @@ func Cleanup(ctx context.Context, e Env, testID string) error {
 	if err != nil {
 		return err
 	}
-	if b, err := e.getObject(ctx, rt.Bucket, "results/"+testID+"/cleanup.json"); err == nil {
-		_ = AppendFile(e.Getenv("GITHUB_STEP_SUMMARY"), "### 정리 결과\n\n```json\n"+string(b)+"\n```\n")
+	// cleanup.json 은 결과마다 쓴다. 성공했는데 결과를 보여 주지 못하면 담당자가 확인할 수 없으므로 실패로 둔다
+	b, readErr := e.getObject(ctx, rt.Bucket, "results/"+testID+"/cleanup.json")
+	if readErr == nil {
+		readErr = AppendFile(e.Getenv("GITHUB_STEP_SUMMARY"), "### 정리 결과\n\n```json\n"+string(b)+"\n```\n")
 	}
 	switch code {
 	case 0:
+		if readErr != nil {
+			return fmt.Errorf("정리는 끝났지만 cleanup.json 을 실행 요약에 남기지 못했다: %w", readErr)
+		}
 		return nil
 	case 2:
 		return errors.New("정리를 거절했다(컨트롤러 로그에 까닭이 있다)")

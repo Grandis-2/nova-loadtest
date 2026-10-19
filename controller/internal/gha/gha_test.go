@@ -437,3 +437,78 @@ func TestRunMissingController(t *testing.T) {
 		t.Fatal("RunTask 를 부르지 않아야 한다")
 	}
 }
+
+// DescribeTasks 에 아직 안 나온 태스크가 있으면 k6 가 없다고 보지 않는다(컨트롤러를 멈추지 않는다)
+func TestStopWithHiddenTask(t *testing.T) {
+	f := newRun(t, "")
+	f.ecs.Behave = func(family string, _ map[string]string, _ int) fakeecs.Behavior {
+		b := fakeecs.Behavior{RunningAfter: time.Second}
+		if family == "nova-prod-loadtest-k6" {
+			b.HiddenFor = time.Minute
+		}
+		return b
+	}
+	f.env.ECS.RunTask(context.Background(), runInput("nova-prod-loadtest-controller", "lt-20261020t0600-1"))
+	f.env.ECS.RunTask(context.Background(), runInput("nova-prod-loadtest-k6", "lt-20261020t0600-1"))
+	err := Stop(context.Background(), f.env, "nova-prod-loadtest", "lt-20261020t0600-1", "nova-prod-loadtest-k6")
+	if err == nil || len(f.ecs.Stops) != 0 {
+		t.Fatalf("조회되지 않는 태스크가 있으면 아무것도 멈추지 않고 실패해야 한다: %v %v", err, f.ecs.Stops)
+	}
+}
+
+// 멈추는 중인 태스크도 도는 것으로 본다(latest 를 옮기지 않는다)
+func TestIdleStopping(t *testing.T) {
+	f := newRun(t, "")
+	f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: time.Second, StopDelay: time.Minute}
+	}
+	out, _ := f.env.ECS.RunTask(context.Background(), runInput("nova-prod-loadtest-k6", "lt-20261020t0600-1"))
+	f.env.ECS.StopTask(context.Background(), &ecs.StopTaskInput{Cluster: aws.String("nova-prod-loadtest"), Task: out.Tasks[0].TaskArn})
+	if err := Idle(context.Background(), f.env, "nova-prod-loadtest"); err == nil {
+		t.Fatal("멈추는 중인 태스크가 있으면 실패해야 한다")
+	}
+}
+
+// Slack 주소가 틀려도 시험 결과는 그대로다
+func TestRunBadSlackURL(t *testing.T) {
+	f := newRun(t, `{"test_id":"lt-20261020t0600-1","scenario":"smoke","result":"pass"}`)
+	f.vars["SLACK_WEBHOOK_URL"] = "http://bad host/\x7f"
+	if err := Run(context.Background(), f.env, cfg(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.out.String(), "Slack 웹훅 주소가 틀렸다") {
+		t.Fatal("경고를 남겨야 한다")
+	}
+}
+
+// 정리가 끝났어도 cleanup.json 을 보여 주지 못하면 실패한다
+func TestCleanupWithoutReport(t *testing.T) {
+	f := newRun(t, "")
+	withData := strings.Replace(runTaskJSON, `"k6":`, `"data":{"taskDefinition":"nova-prod-loadtest-data","container":"data","subnets":["subnet-aaa"],"securityGroups":["sg-ddd"],"assignPublicIp":"DISABLED"},"k6":`, 1)
+	f.env.SSM = fakeSSM{ParamRunTask: withData}
+	err := Cleanup(context.Background(), f.env, "lt-20261020t0600-1")
+	if err == nil || !strings.Contains(err.Error(), "cleanup.json") {
+		t.Fatalf("결과를 남기지 못하면 실패해야 한다: %v", err)
+	}
+	f.s3.m["results/lt-20261020t0600-1/cleanup.json"] = `{"result":"done"}`
+	if err := Cleanup(context.Background(), f.env, "lt-20261020t0600-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentialSource(t *testing.T) {
+	for _, tc := range []struct {
+		server, role, url string
+		ok                bool
+	}{
+		{"https://github.com", "arn:role", "https://token", true},
+		{"https://github.com", "", "https://token", false}, // 비밀이 비었다
+		{"https://github.com", "arn:role", "", false},      // id-token 권한이 없다
+		{"http://forgejo:3000", "", "", true},              // 로컬: moto 자격 증명
+		{"http://forgejo:3000", "arn:role", "", false},
+	} {
+		if err := credentialSource(tc.server, tc.role, tc.url); (err == nil) != tc.ok {
+			t.Errorf("%+v: %v", tc, err)
+		}
+	}
+}

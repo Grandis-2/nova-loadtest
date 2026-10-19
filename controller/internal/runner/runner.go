@@ -193,9 +193,29 @@ func (r *Runner) ListStartedBy(ctx context.Context, startedBy string) ([]string,
 	return r.list(ctx, &ecs.ListTasksInput{Cluster: aws.String(r.Cluster), StartedBy: aws.String(startedBy)})
 }
 
-// ListRunning은 클러스터에서 도는 태스크를 모두 돌려준다.
+// ListRunning은 클러스터에서 아직 멈추지 않은 태스크를 모두 돌려준다.
+// StopTask 를 받은 태스크는 desiredStatus 가 STOPPED 라 기본 ListTasks 에 나오지 않지만, 멈출 때까지는
+// 아직 돌고 있다(요청을 보내고, 요약을 올린다). 그래서 desiredStatus STOPPED 목록도 보고, 아직 STOPPED 가
+// 아닌 것(조회에 아직 안 나온 것 포함)을 더한다.
 func (r *Runner) ListRunning(ctx context.Context) ([]string, error) {
-	return r.list(ctx, &ecs.ListTasksInput{Cluster: aws.String(r.Cluster)})
+	arns, err := r.list(ctx, &ecs.ListTasksInput{Cluster: aws.String(r.Cluster)})
+	if err != nil {
+		return nil, err
+	}
+	stopping, err := r.list(ctx, &ecs.ListTasksInput{Cluster: aws.String(r.Cluster), DesiredStatus: types.DesiredStatusStopped})
+	if err != nil || len(stopping) == 0 {
+		return arns, err
+	}
+	states, err := r.Describe(ctx, stopping, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range states {
+		if s.LastStatus != "STOPPED" {
+			arns = append(arns, s.ARN)
+		}
+	}
+	return arns, nil
 }
 
 func (r *Runner) list(ctx context.Context, in *ecs.ListTasksInput) ([]string, error) {

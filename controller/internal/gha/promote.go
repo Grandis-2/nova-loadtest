@@ -19,14 +19,6 @@ type ECR interface {
 	PutImage(context.Context, *ecr.PutImageInput, ...func(*ecr.Options)) (*ecr.PutImageOutput, error)
 }
 
-// buildx 는 이미지 인덱스(OCI)를 올린다. 단일 매니페스트도 받는다
-var manifestTypes = []string{
-	"application/vnd.oci.image.index.v1+json",
-	"application/vnd.docker.distribution.manifest.list.v2+json",
-	"application/vnd.oci.image.manifest.v1+json",
-	"application/vnd.docker.distribution.manifest.v2+json",
-}
-
 // Promote 는 저장소마다 커밋 태그의 매니페스트를 latest 태그로 다시 쓴다.
 // 레이어를 내려받지 않으므로 빌드 역할의 BatchGetImage, PutImage 권한만 쓴다
 // (docker buildx imagetools create 는 레이어를 읽어 ecr:GetDownloadUrlForLayer 가 필요하다).
@@ -36,8 +28,9 @@ func Promote(ctx context.Context, c ECR, repos []string, sha string) error {
 	var images []image
 	for _, repo := range repos {
 		out, err := c.BatchGetImage(ctx, &ecr.BatchGetImageInput{
+			// acceptedMediaTypes 는 넘기지 않는다. 넘길 수 있는 값은 단일 매니페스트 형식뿐이라 buildx 의 이미지 인덱스는
+			// 고를 수 없고, 넘기지 않으면 ECR 은 저장된 매니페스트와 그 형식을 그대로 돌려준다(ECR 의 태그 다시 붙이기 안내와 같다)
 			RepositoryName: aws.String(repo), ImageIds: []ecrtypes.ImageIdentifier{{ImageTag: aws.String(sha)}},
-			AcceptedMediaTypes: manifestTypes,
 		})
 		if err != nil {
 			return fmt.Errorf("%s:%s 매니페스트: %w", repo, sha, err)
@@ -48,10 +41,11 @@ func Promote(ctx context.Context, c ECR, repos []string, sha string) error {
 		images = append(images, image{repo, aws.ToString(out.Images[0].ImageManifest), aws.ToString(out.Images[0].ImageManifestMediaType)})
 	}
 	for _, im := range images {
-		_, err := c.PutImage(ctx, &ecr.PutImageInput{
-			RepositoryName: aws.String(im.repo), ImageTag: aws.String("latest"),
-			ImageManifest: aws.String(im.manifest), ImageManifestMediaType: aws.String(im.mediaType),
-		})
+		in := &ecr.PutImageInput{RepositoryName: aws.String(im.repo), ImageTag: aws.String("latest"), ImageManifest: aws.String(im.manifest)}
+		if im.mediaType != "" {
+			in.ImageManifestMediaType = aws.String(im.mediaType) // 받은 형식 그대로 쓴다
+		}
+		_, err := c.PutImage(ctx, in)
 		var exists *ecrtypes.ImageAlreadyExistsException
 		if errors.As(err, &exists) {
 			continue // latest 가 이미 이 커밋이다(다시 돌린 경우)

@@ -10,16 +10,23 @@ import (
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 )
 
+// buildx 가 올리는 이미지 인덱스 형식
+const indexType = "application/vnd.oci.image.index.v1+json"
+
 type fakeECR struct {
 	images map[string]string // 저장소:태그 → 매니페스트
 	puts   []string
 }
 
 func (f *fakeECR) BatchGetImage(_ context.Context, in *ecr.BatchGetImageInput, _ ...func(*ecr.Options)) (*ecr.BatchGetImageOutput, error) {
+	if len(in.AcceptedMediaTypes) > 0 {
+		// ECR 은 단일 매니페스트 형식만 받는다. 인덱스를 넘기면 거절한다
+		return nil, errors.New("InvalidParameterException: acceptedMediaTypes")
+	}
 	out := &ecr.BatchGetImageOutput{}
 	key := aws.ToString(in.RepositoryName) + ":" + aws.ToString(in.ImageIds[0].ImageTag)
 	if m, ok := f.images[key]; ok {
-		out.Images = []ecrtypes.Image{{ImageManifest: aws.String(m), ImageManifestMediaType: aws.String(manifestTypes[0])}}
+		out.Images = []ecrtypes.Image{{ImageManifest: aws.String(m), ImageManifestMediaType: aws.String(indexType)}}
 	}
 	return out, nil
 }
@@ -29,8 +36,8 @@ func (f *fakeECR) PutImage(_ context.Context, in *ecr.PutImageInput, _ ...func(*
 	if f.images[key] == aws.ToString(in.ImageManifest) {
 		return nil, &ecrtypes.ImageAlreadyExistsException{Message: aws.String("exists")}
 	}
-	if aws.ToString(in.ImageManifestMediaType) == "" {
-		return nil, errors.New("media type 이 필요하다")
+	if aws.ToString(in.ImageManifestMediaType) != indexType {
+		return nil, errors.New("받은 매니페스트 형식을 그대로 넘겨야 한다")
 	}
 	f.images[key] = aws.ToString(in.ImageManifest)
 	f.puts = append(f.puts, key)

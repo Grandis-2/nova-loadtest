@@ -7,7 +7,9 @@ require go.yaml.in/yaml/v3 v3.0.5
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
+	github.com/aws/aws-sdk-go-v2/service/ecs v1.100.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4
 	github.com/golang-jwt/jwt/v5 v5.3.0
 )
 

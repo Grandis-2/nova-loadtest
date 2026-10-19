@@ -21,19 +21,20 @@ var (
 )
 
 // Input은 loadtest.yml의 입력이다. 비어 있는 값은 시나리오 기본값을 쓴다.
+// 워크플로가 컨트롤러에 INPUT_JSON 으로 넘길 때 아래 JSON 이름을 쓴다.
 type Input struct {
-	TestID         string
-	Scenario       string
-	ProductID      string
-	PrepProductID  string
-	OpenAt         string // RFC 3339(UTC). 비면 바로 시작한다
-	PeakRPS        float64
-	Duration       string
-	RampUp         string
-	Runners        int
-	AbortErrorRate float64
-	Flows          []string  // 비면 다섯 흐름 모두
-	Now            time.Time // open_at이 너무 가까운지 볼 때만 쓴다
+	TestID         string    `json:"test_id"`
+	Scenario       string    `json:"scenario"`
+	ProductID      string    `json:"product_id,omitempty"`
+	PrepProductID  string    `json:"prep_product_id,omitempty"`
+	OpenAt         string    `json:"open_at,omitempty"` // RFC 3339(UTC). 비면 바로 시작한다
+	PeakRPS        float64   `json:"peak_rps,omitempty"`
+	Duration       string    `json:"duration,omitempty"`
+	RampUp         string    `json:"ramp_up,omitempty"`
+	Runners        int       `json:"runners,omitempty"`
+	AbortErrorRate float64   `json:"abort_error_rate,omitempty"`
+	Flows          []string  `json:"flows,omitempty"` // 비면 다섯 흐름 모두
+	Now            time.Time `json:"-"`               // open_at이 너무 가까운지 볼 때만 쓴다
 }
 
 // Range는 회원 번호 범위 [Start, Start+Count)이다.

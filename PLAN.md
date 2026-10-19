@@ -121,12 +121,13 @@ sequenceDiagram
 | `scenario` | `smoke` | smoke, load, spike, stress, soak 중 하나 |
 | `product_id` | 없음 | 진입과 접수에 쓰는 시험 상품 ID. 진입 흐름이 있으면 반드시 넣는다 |
 | `prep_product_id` | `product_id` | 조회, 취소, 결제에 쓸 예약을 미리 만들어 둘 시험 상품 ID. spike에서는 따로 넣는다 |
-| `open_at` | 없음 | 회차가 열리는 시각(UTC). 넣으면 본 시험을 이 시각에 맞춰 시작한다. spike에서는 반드시 넣는다 |
+| `open_at` | 없음 | 회차가 열리는 시각(UTC). 넣으면 본 시험을 이 시각에 맞춰 시작한다. spike에서는 반드시 넣는다. 지금부터 1시간 안이어야 한다(기다리는 시간도 작업 6시간 상한과 토큰 유효 시간에 들어가기 때문이다) |
 | `peak_rps` | 시나리오 기본값 | 초당 흐름 시작 수의 최대치(모든 흐름의 합계). 요청 수가 아니다 |
 | `duration` | 시나리오 기본값 | 최대치를 유지하는 시간(예: smoke `2m`, load `30m`) |
 | `ramp_up` | 시나리오 기본값 | 최대치까지 올리는 시간(예: load `1m`, spike `10s`) |
 | `runners` | 자동 | k6 태스크 대수. 비워 두면 태스크 하나가 초당 1,000건을 맡는다고 보고 계산한다. 이 값은 smoke와 load에서 실측한 뒤 고친다 |
 | `abort_error_rate` | `5` | 오류율이 이 값(%)을 1분 넘게 넘으면 시험을 멈춘다 |
+| `flows` | 모두 | 돌릴 흐름(쉼표로 구분). 첫 smoke는 `catalog`만 넣어 토큰, 회원, 시험 상품 없이 돌린다 |
 
 터미널에서는 `gh workflow run loadtest.yml -f scenario=spike -f product_id=<id> -f prep_product_id=<id> -f open_at=<UTC 시각> -f peak_rps=500`처럼 실행할 수 있다.
 

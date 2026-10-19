@@ -26,7 +26,7 @@
 - 같은 시간에는 시험을 하나만 돌린다(`concurrency`). 진행 중인 시험을 취소하지는 않는다.
 - **시험 ID**는 `lt-<UTC yyyymmddThhmm>-<run_number>` 형식이다(예: `lt-20261017t0630-12`). 소문자, 숫자, `-`만 쓴다. 이 값을 RunTask의 `startedBy`(36자 이하, 영문·숫자·`-`·`_`), k6의 `test_id` 태그, User-Agent, S3 경로에 그대로 쓰기 때문에, 모든 곳에서 허용되는 글자만 골랐다.
 - AWS에는 OIDC로 맡는 역할로 접근한다. 세션은 1시간인데, 컨트롤러를 기다리는 단계 하나가 몇 시간씩 걸릴 수 있다. 단계 안에서는 `configure-aws-credentials`를 다시 부를 수 없으므로, 기다리는 Go 명령이 50분마다 Actions OIDC 토큰을 새로 받아 `AssumeRoleWithWebIdentity`로 세션을 바꾼다.
-- **OIDC 신뢰 조건**: 작업이 `loadtest` environment를 쓰면 OIDC 토큰의 `sub`가 `repo:<저장소>:environment:loadtest`로 바뀐다. 그래서 브랜치 조건(`ref:refs/heads/main`)만으로는 역할을 맡을 수 없다.
+- **OIDC 신뢰 조건**: 작업이 `loadtest` environment를 쓰면 OIDC 토큰의 `sub`가 `repo:<저장소>:environment:loadtest`로 바뀐다. 이 저장소는 immutable subject 형식이라 `<저장소>`가 `Grandis-2@<ID>/nova-loadtest@<ID>`이다([설정과 비밀 값](configuration.md#oidc-신뢰-조건)). 그래서 브랜치 조건(`ref:refs/heads/main`)만으로는 역할을 맡을 수 없다.
   - 시험 실행 역할은 environment 값을 신뢰한다. main에서만 돌게 하는 제한은 environment의 배포 브랜치 규칙이 맡는다.
   - `build.yml`, `stop.yml`, 그리고 `loadtest.yml`의 입력 확인 작업은 environment 없이 main 조건으로 빌드 역할을 맡는다.
 - 태스크는 `latest` 이미지로 돈다. RunTask로는 이미지를 바꿀 수 없기 때문이다. 대신 결과에 이미지 다이제스트와 커밋을 남긴다. 시험 중에 `latest`가 바뀌지 않게 하는 방법은 아래 "인프라 값"에 있다.
@@ -99,20 +99,25 @@
 
 ## 흐름과 회원 풀
 
-흐름과 비율은 breakscale의 클라이언트 구성을 따른다. API 경로와 요청 형식은 be main 브랜치의 컨트롤러 코드를 보고 맞춘다.
+흐름과 비율은 breakscale의 클라이언트 구성을 따른다. API 경로와 요청 형식은 be `contracts/` 문서가 아니라 be main 브랜치의 컨트롤러와 DTO 코드를 직접 보고 맞춘다(마지막 대조: `4d5863cb`, 2026-10-19).
 
 | 흐름 | 요청 | 회원 | 평시 초당 흐름 수 |
 |---|---|---|---|
-| 진입과 접수 | `POST /api/v1/preorders/queue?productId=`를 보낸다. 202를 받으면 `Retry-After`에 적힌 초마다 `Queue-Token`을 실어 `GET`으로 순번을 확인한다. `ADMITTED`가 되면 `admissionTicket`을 받는다. 그다음 `POST /api/v1/preorders?productId=`에 `Idempotency-Key`, `X-Admission-Ticket`, 본문 `{productId, optionId}`를 보낸다 | 풀 A | 5 |
+| 진입과 접수 | `POST /api/v1/preorders/queue?productId=`를 보낸다. 바로 입장하면 200과 `ADMITTED`, 줄에 서면 202와 `WAITING`(`queueToken`, 헤더 `Retry-After`)이 온다. 202면 `Retry-After`에 적힌 초마다 `Queue-Token` 헤더를 실어 `GET`으로 확인한다. 확인 응답에 새 `queueToken`이 오면(만료가 가까울 때 바뀐다) 그 값으로 바꾼다. `ADMITTED`가 되면 `admissionTicket`을 받고, `POST /api/v1/preorders?productId=`에 `Idempotency-Key`(8~64자), `X-Admission-Ticket`, 본문 `{productId, optionId}`를 보낸다. 성공은 202이다 | 풀 A | 5 |
 | 내 예약 조회 | `GET /api/v1/preorders`, `/active`, `/{preorderId}` | 풀 B | 10 |
-| 예약 취소 | `GET /api/v1/preorders?productId=<준비 상품>`으로 예약을 찾고 `POST /api/v1/preorders/{id}/cancel`을 보낸다 | 풀 C | 1 |
-| 주문과 결제 시도 | `GET /api/v1/preorders?productId=<준비 상품>&status=REGISTERED`로 등록이 끝난 예약을 찾는다. `POST /api/v1/orders`(본문 `source=PREORDER`, `preorderId`, `shipTo`)를 보내고, 이어서 `POST /api/v1/orders/{id}/payment-attempts`를 보낸다. 결제 시도 생성은 토스를 호출하지 않는다. 결제 승인은 보내지 않는다 | 풀 B | 5 |
+| 예약 취소 | `GET /api/v1/preorders?productId=<준비 상품>`으로 예약을 찾고 `POST /api/v1/preorders/{preorderId}/cancel`을 보낸다. 본문은 선택(`{reason}`)이고 `Idempotency-Key`는 받지 않는다. 성공은 202이다 | 풀 C | 1 |
+| 주문과 결제 시도 | `GET /api/v1/preorders?productId=<준비 상품>&status=REGISTERED`로 등록이 끝난 예약을 찾는다. `POST /api/v1/orders`(본문 `source=PREORDER`, `preorderId`, `shipTo{name, phone, postalCode, line1, line2}`)를 보낸다. 새로 만들면 201, 같은 예약의 주문이 이미 있으면 200과 그 주문이 온다. `PREORDER` 주문은 `Idempotency-Key`를 받지 않는다. 이어서 본문 없이 `POST /api/v1/orders/{orderId}/payment-attempts`를 보낸다(201). 결제 시도 생성은 결제사(토스)를 호출하지 않고, preorder에 결제 가능 여부를 다시 묻고 payment에 대기 중인 거래를 만든다. 결제 승인은 보내지 않는다 | 풀 B | 5 |
 | 상품 조회 | `GET /api/v1/products`, `/{productId}`, `GET /api/v1/categories`. 토큰이 필요 없다 | 없음 | 80 |
 
 - 결제나 취소할 예약을 찾을 때는 `/active`를 쓰지 않는다. `/active`에는 상품 필터가 없어서, 회원을 다시 쓰면 지난 시험 상품의 예약까지 나오고 그 예약을 결제하거나 취소하게 된다. 그래서 목록 API의 `productId`로 이번 준비 상품의 예약만 고른다. `/active`는 조회 흐름의 부하로만 부른다.
 - 평시 비율은 breakscale `01-평시`를 따른다. breakscale README의 "평시 트래픽 비율"(폴링 300, 상품 200 …)은 02, 03 시나리오의 배경 트래픽이므로 평시로 쓰지 않는다.
 - 대기열 확인 요청에는 도착률을 따로 정하지 않는다. 진입한 회원이 서버가 알려 준 간격대로 확인하므로, 확인 요청 수는 기다리는 인원에 따라 저절로 정해진다. breakscale이 예측한 확인 요청 수와는 결과로 비교한다.
 - productId는 소문자 UUID여야 한다. 대문자가 섞이면 400 응답이 온다.
+- 접수 본문의 `optionId`는 공개 상품 상세(`GET /api/v1/products/{productId}`)의 `variants[].variantId`와 같은 값이다(catalog의 옵션 ID). k6는 `setup()`에서 상품 상세를 읽어 판매 중인 variant의 ID를 쓴다.
+- 모든 응답은 `{success, data, error{code, message, details}, timestamp, traceId}` 봉투로 온다. 오류는 `error.code`로 구분한다.
+- 대기 응답에 `paused: true`가 오면 줄이 멈춘 것이다. 순서는 그대로이므로 확인을 계속해야 자리가 남는다.
+- 주문은 예약이 `REGISTERED`가 된 뒤에 만들 수 있다. 그 전이면 409 `PREORDER_NOT_PAYABLE`이 온다.
+- 주문 배송지는 형식 검사 없이 길이만 본다(이름 50자, 전화 20자, 우편번호 10자, 주소 200자, 상세 주소는 선택). k6는 회원 번호로 자연스러운 한글 이름, 전화번호, 주소를 만들어 보낸다(`k6/lib/fake.js`).
 - 로그인과 토큰 재발급은 넣지 않는다. 직접 발급한 토큰에는 세션 기록이 없어서 재발급이 되지 않는다. 로그인 부하를 재야 한다면 be에 시험 전용 로그인을 요청한다.
 - 서버가 느려져도 보내는 양이 줄지 않도록 도착률 기반 실행기를 쓴다.
 - 모든 요청에 `tags.name`을 경로 템플릿으로 붙인다(예: `/api/v1/products/{id}`). 메서드는 `method` 태그가 따로 있으므로 넣지 않고, 쿼리 문자열(`?productId=`)도 넣지 않는다. k6는 `name`이 없으면 URL 원문을 넣는데, 그러면 ID마다 시계열이 생겨 끝없이 늘어난다. 시계열 수를 지키는 것은 이 태그이고, 게이트웨이 필터는 실수했을 때를 대비한 안전망일 뿐이다.
@@ -136,7 +141,7 @@
 |---|---|---|---|---|
 | smoke | 초당 약 0.25건 × 2분 | 50명 | 수 명 | 수백 명 |
 | load (평시 × 2) | 초당 10건 × 30분 = 약 18,000명 | 1,000명 | 초당 2건 × 30분 = 3,600명 | 약 22,600명 |
-| spike (02) | 10초에 5,000건 + 관찰 10분 동안 초당 5건 = 약 8,000명 | 1,000명 | 초당 1건 × 10분 = 약 600명 | 약 9,600명 |
+| spike (02) | 10초에 5,000건 + 관찰 10분 동안 초당 5건 = 약 8,000명 | 1,000명 | 초당 1건 × 본 시험 약 10분 = 약 600명 | 약 9,600명 |
 | stress | 진입 5·10·20·30·40/초 × 단계마다 5분 = 약 31,500명 | 1,000명 | 1·2·4·6·8/초 × 5분 = 6,300명 | 약 38,800명 |
 | soak (평시) | 초당 5건 × 4시간 = 72,000명 | 1,000명 | 초당 1건 × 4시간 = 14,400명 | 약 87,400명 |
 
@@ -162,7 +167,7 @@
 | 구간 | 시간 | 하는 일 |
 |---|---|---|
 | 준비 | `open_at` 전 | `prep_product_id`에서 풀 B와 C를 진입·접수시키고, 예약이 `REGISTERED`가 될 때까지 기다린다 |
-| 배경 | 준비가 끝난 뒤부터 시험 끝까지 | breakscale 02의 배경 트래픽에서 로그인을 뺀 부하를 보낸다: 상품 200, 예약 조회 30, 결제 10, 취소 1. 대기열 확인 요청은 따로 정하지 않는다 |
+| 배경 | 본 시험 시작(`open_at`)부터 시험 끝까지. 등록 대기 중에 돌리면 주문과 취소가 아직 등록되지 않은 예약을 찾는다 | breakscale 02의 배경 트래픽에서 로그인을 뺀 부하를 보낸다: 상품 200, 예약 조회 30, 결제 10, 취소 1. 대기열 확인 요청은 따로 정하지 않는다 |
 | 몰림 | `open_at` + 1초부터 10초 동안 | `product_id`에 초당 500건씩, 모두 5,000명(풀 A)이 진입한다 |
 | 관찰 | 몰림 뒤 10분 | 진입은 평시 수준(5/초)으로 돌아간다. 대기열이 비고, 등록 큐와 `preorder-events`가 빠지는 과정을 본다 |
 

@@ -1,0 +1,154 @@
+# 부하 시험 설정. 계획 계산(controller/cmd/plan), 컨트롤러, 토큰 발급기가 이 파일을 읽는다.
+# 토큰 발급기는 빌드할 때 이 파일을 실행 파일에 넣는다. 그래서 members 범위는 실행 중에 바꿀 수 없다.
+# 설명은 docs/implementation-plan.md 2.1, 근거는 docs/design.md 에 있다.
+# "추정"이라고 적은 값은 smoke 와 load 에서 실측한 뒤 고친다(C-5).
+
+# 흐름. weight 는 평시 초당 흐름 시작 수(breakscale 01-평시, 합계 101).
+# requests 는 WAF 요청 제한에 세는 요청 수, queue_requests 는 대기열 경로(제한에서 빠짐)의 요청 수다.
+# iteration_seconds 는 흐름 하나가 VU 를 잡는 시간(추정)이다.
+flows:
+  catalog:
+    weight: 80
+    pool: none
+    requests: 3            # 상품 목록, 상품 상세, 카테고리
+    iteration_seconds: 1
+  preorders:
+    weight: 10
+    pool: b
+    requests: 3            # 예약 목록, /active, 예약 상세
+    iteration_seconds: 1
+  entry:
+    weight: 5
+    pool: a
+    requests: 1            # 접수
+    queue_requests: 2      # 진입, 순번 확인 한 번(줄이 없을 때)
+    iteration_seconds: 3
+  order:
+    weight: 5
+    pool: b
+    requests: 3            # 예약 찾기, 주문, 결제 시도
+    iteration_seconds: 1
+  cancel:
+    weight: 1
+    pool: c
+    requests: 2            # 예약 찾기, 취소
+    iteration_seconds: 1
+
+# 대기열
+admission_rps: 150         # 입장 속도(AdmissionProperties globalCredit)
+entry_cap_rps: 120         # 진입 상한. 입장 속도의 80%
+poll_interval_seconds: 2   # 줄에 선 회원의 평균 확인 간격(추정. 서버는 1, 3, 10, 30초를 준다)
+
+# WAF 예외 없이 도는 시나리오의 IP(태스크)당 5분 요청 상한. 제한 3,000 의 80%
+waf_limit_per_5m: 2400
+
+scenarios:
+  smoke:
+    shape: constant
+    peak_rps: 5
+    duration: 2m
+    max_rps: 20
+    max_duration: 10m
+    max_vus: 500
+    waf_exempt: false
+    pool_b: 50
+  load:
+    shape: ramping
+    peak_rps: 202          # 평시 × 2
+    duration: 30m
+    ramp_up: 1m
+    max_rps: 2000
+    max_duration: 2h
+    max_vus: 10000
+    waf_exempt: true
+    pool_b: 1000
+  spike:
+    shape: spike
+    peak_rps: 500          # 몰림의 초당 진입 수
+    duration: 10m          # 몰림 뒤 관찰 시간
+    burst_seconds: 10
+    observe_entry_rps: 5   # 관찰 구간의 진입(평시)
+    background:            # breakscale 02 의 배경 트래픽에서 로그인을 뺀 것
+      catalog: 200
+      preorders: 30
+      order: 10
+      cancel: 1
+    max_rps: 2000
+    max_duration: 1h
+    max_vus: 15000
+    waf_exempt: true
+    pool_b: 1000
+  stress:
+    shape: step
+    peak_rps: 808          # 평시 × 8 (마지막 단계)
+    steps: [1, 2, 4, 6, 8] # 평시의 배수
+    step_duration: 5m
+    max_rps: 2000
+    max_duration: 2h
+    max_vus: 15000
+    waf_exempt: true
+    pool_b: 1000
+  soak:
+    shape: constant
+    peak_rps: 101          # 평시 × 1
+    duration: 4h
+    max_rps: 500
+    max_duration: 6h
+    max_vus: 10000
+    waf_exempt: true
+    pool_b: 1000
+
+runner:
+  requests_per_task: 1000  # 태스크당 초당 요청(추정)
+  vu_memory_mb: 5          # VU 하나의 메모리(추정)
+  task_memory_mb: 8192
+  headroom: 0.3            # 목표보다 30% 여유
+  vu_burst_factor: 1.5     # maxVUs = 예상 VU × 이 값
+  max_tasks: 20            # Fargate vCPU 할당량에서 운영 사용분을 뺀 값. 정할 것
+  start_delay: 2m          # 컨트롤러가 START_AT 을 지금 + 이 시간으로 잡는다
+  entry_graceful_stop: 3m  # 줄에 선 회원이 잘리지 않게
+  job_limit: 6h            # GitHub Actions 작업 하나의 상한
+  max_open_at_lead: 1h     # open_at 은 지금부터 이 시간 안이어야 한다. 이 대기를 토큰 유효 시간과 작업 시간에 넣는다
+
+members:
+  start: 1                 # 시험 회원 번호. id = 10ad7e57-0000-7000-8000-<12자리 번호>
+  count: 100000
+  prep_rps: 100            # 준비 구간 속도
+  register_wait: 2m        # 준비한 예약이 REGISTERED 가 될 때까지
+  token_margin: 30m        # 토큰 유효 시간 = 시험 시간 + 이 값
+  max_token_ttl: 6h30m
+
+# 시계열 수 계산(시험 하나, Mimir 한도를 지키려고 2만 개 이하로 둔다)
+series:
+  limit: 20000
+  names: 12                # tags.name × method 조합
+  statuses_per_name: 3     # 추정
+  histogram: 18            # 경계 15 + +Inf 버킷 = 16, 합, 개수
+  counters_per_name: 2     # http_reqs, http_req_failed
+  extra_per_task: 60       # entry_to_accept, vus, iterations, error_code 등
+
+slo:
+  p95_ms: 500
+  max_5xx_rate: 0.001
+  abort_error_rate: 5      # %, 입력 abort_error_rate 의 기본값
+  abort_5xx_rate: 1        # %
+  abort_after: 1m
+
+cleanup:
+  # 정리 전에 비어야 하는 큐. 이름만 두고 계정 ID 는 넣지 않는다. 컨트롤러 역할은 이 네 큐만 볼 수 있다
+  # (nova-infra 시험 스택 iam.tf 의 watched_queues)
+  queues:
+    - preorder-register
+    - preorder-cancel
+    - preorder-events
+    - order-events
+  max_wait: 30m
+
+# Mimir 의 지표 이름과 라벨. smoke(C-2)에서 확정한 값으로 고친다
+metrics:
+  job: loadtest/k6
+  instance_label: instance
+  duration: k6_http_req_duration_milliseconds
+  reqs: k6_http_reqs_total
+  vus: k6_vus
+  le_500: "500"

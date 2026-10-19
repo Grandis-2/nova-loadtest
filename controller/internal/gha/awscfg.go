@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -66,7 +69,42 @@ func credentialSource(server, roleARN, reqURL string) error {
 // 세션은 1시간인데 컨트롤러를 기다리는 단계 하나가 몇 시간 걸릴 수 있다. 단계 안에서는 configure-aws-credentials 를
 // 다시 부를 수 없으므로, 자격 증명 캐시가 만료 10분 전에 OIDC 토큰을 새로 받아 역할을 다시 맡는다(docs/design.md "실행").
 // 로컬 Forgejo 에서는 역할 ARN 을 주지 않고 moto 용 가짜 자격 증명(환경 변수)을 쓴다.
-func AWSConfig(ctx context.Context, roleARN, sessionName string) (aws.Config, error) {
+//
+// 설정을 만든 뒤 계정 ID 를 가린다(MaskAccount). 공개 저장소의 실행 로그에 계정 ID 가 남지 않게 한다.
+func AWSConfig(ctx context.Context, out io.Writer, roleARN, sessionName string) (aws.Config, error) {
+	// 역할을 맡다가 난 오류에도 계정 ID 가 들어 있을 수 있다. 역할 ARN 에서 계정 ID 를 꺼내 먼저 가린다
+	if err := maskARNAccount(out, roleARN); err != nil {
+		return aws.Config{}, err
+	}
+	cfg, err := awsConfig(ctx, roleARN, sessionName)
+	if err != nil {
+		return cfg, err
+	}
+	return cfg, MaskAccount(ctx, sts.NewFromConfig(cfg), out, os.Getenv("GITHUB_SERVER_URL") == githubURL)
+}
+
+var accountRe = regexp.MustCompile(`\b\d{12}\b`)
+
+// maskARNAccount 는 ARN(arn:aws:iam::<계정>:role/...)의 계정 ID 를 가린다. ARN 이 아니면 아무것도 하지 않는다
+func maskARNAccount(out io.Writer, arn string) error {
+	parts := strings.Split(arn, ":")
+	if len(parts) < 6 || !accountRe.MatchString(parts[4]) {
+		return nil
+	}
+	return mask(out, parts[4])
+}
+
+func mask(out io.Writer, v string) error {
+	if _, err := fmt.Fprintf(out, "::add-mask::%s\n", v); err != nil {
+		return fmt.Errorf("로그 가리기 명령을 쓰지 못했다: %w", err)
+	}
+	return nil
+}
+
+// Redact 는 오류 메시지의 12자리 숫자(계정 ID)를 *** 로 바꾼다. 가리기 전에 난 오류를 찍을 때 쓴다
+func Redact(s string) string { return accountRe.ReplaceAllString(s, "***") }
+
+func awsConfig(ctx context.Context, roleARN, sessionName string) (aws.Config, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return cfg, err
@@ -89,4 +127,23 @@ func AWSConfig(ctx context.Context, roleARN, sessionName string) (aws.Config, er
 		return cfg, fmt.Errorf("역할을 맡지 못했다: %w", err)
 	}
 	return cfg, nil
+}
+
+// STS 는 MaskAccount 가 쓰는 API 다
+type STS interface {
+	GetCallerIdentity(context.Context, *sts.GetCallerIdentityInput, ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error)
+}
+
+// MaskAccount 는 맡은 자격 증명의 계정 ID 를 ::add-mask:: 로 가린다. 태스크 ARN, AWS 오류 메시지(역할 ARN),
+// 컨트롤러 로그 어디에 계정 ID 가 나와도 실행 로그에는 *** 로 남는다.
+// GitHub 에서 계정 ID 를 알아내지 못하면 가리지 못한 채 계속하지 않고 실패한다(required).
+func MaskAccount(ctx context.Context, c STS, out io.Writer, required bool) error {
+	id, err := c.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil || aws.ToString(id.Account) == "" {
+		if required {
+			return fmt.Errorf("계정 ID 를 알아내지 못해 로그에서 가릴 수 없다: %s", Redact(fmt.Sprint(err)))
+		}
+		return nil // 로컬(moto)
+	}
+	return mask(out, aws.ToString(id.Account))
 }

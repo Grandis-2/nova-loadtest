@@ -100,6 +100,7 @@ flowchart LR
 | `CONTROLLER_INLINE`, `CONTROLLER_BIN` | `run`, `cleanup` | 로컬 Forgejo 전용. `1`이면 컨트롤러를 RunTask로 띄우지 않고 `CONTROLLER_BIN` 실행 파일을 바로 돌린다. GitHub에서 켜져 있으면 바로 실패한다 |
 
 - `run`, `cleanup`은 시작할 때 실행 위치를 확인한다. `GITHUB_SERVER_URL`이 `https://github.com`이 아니면 `AWS_ENDPOINT_URL`과 `AWS_ENDPOINT_URL_ECS`가 로컬 주소(compose 안의 이름, localhost, 사설 IP)여야 한다([구현 계획 7.4](implementation-plan.md#74-운영에-닿지-않게)).
+- AWS를 부르는 명령은 역할을 맡은 직후 `sts:GetCallerIdentity`로 계정 ID를 알아내 `::add-mask::`로 가린다. 공개 저장소라 실행 로그(태스크 ARN, AWS 오류 메시지, 옮겨 온 컨트롤러 로그)에 계정 ID가 남지 않게 한다. GitHub에서 계정 ID를 알아내지 못하면 가리지 못한 채 계속하지 않고 실패한다.
 - `run`은 SSM 두 값을 읽은 직후 다른 무엇을 출력하기 전에 가릴 값마다 `::add-mask::`를 낸다. `after`도 SSM 값을 다시 읽으므로 같은 순서를 지킨다.
 - `run`은 결과(`summary.json`)가 합격이나 한계 측정이 아니면 실패로 끝난다. `summary.json`이 없으면 판정 불가로 실패한다.
 

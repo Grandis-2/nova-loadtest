@@ -44,8 +44,9 @@ func main() {
 	}
 }
 
+// fail 은 오류를 찍고 끝낸다. 계정 ID 를 가리기 전에 난 오류일 수 있어 12자리 숫자를 지운다
 func fail(err error) {
-	fmt.Printf("::error::%v\n", err)
+	fmt.Printf("::error::%s\n", gha.Redact(err.Error()))
 	os.Exit(1)
 }
 
@@ -74,7 +75,7 @@ func run(ctx context.Context, cmd string) error {
 	if err := gha.Guard(os.Getenv); err != nil {
 		return err
 	}
-	awsCfg, err := gha.AWSConfig(ctx, os.Getenv("AWS_ROLE_ARN"), "nova-loadtest-"+cmd)
+	awsCfg, err := gha.AWSConfig(ctx, os.Stdout, os.Getenv("AWS_ROLE_ARN"), "nova-loadtest-"+cmd)
 	if err != nil {
 		return err
 	}
@@ -105,7 +106,7 @@ func run(ctx context.Context, cmd string) error {
 
 // checkImages 는 ECR 의 세 저장소에 latest 가 있는지 본다(빌드 역할)
 func checkImages(ctx context.Context, roleARN string) error {
-	awsCfg, err := gha.AWSConfig(ctx, roleARN, "nova-loadtest-plan")
+	awsCfg, err := gha.AWSConfig(ctx, os.Stdout, roleARN, "nova-loadtest-plan")
 	if err != nil {
 		return err
 	}

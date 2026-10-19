@@ -208,7 +208,8 @@ func (e Env) controller(ctx context.Context, rt *infra.RunTask, startedBy string
 	if err != nil {
 		return 0, err
 	}
-	e.printf("컨트롤러를 띄웠다: %s", arn)
+	// ARN 에는 계정 ID 가 들어 있다. 태스크 ID 만 보인다
+	e.printf("컨트롤러를 띄웠다: 태스크 %s", taskID(arn))
 	logs := logTail{logs: e.Logs, group: "/ecs/" + rt.Cluster, stream: t.Container + "/" + t.Container + "/" + taskID(arn)}
 	failures := 0
 	for {

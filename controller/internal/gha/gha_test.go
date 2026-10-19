@@ -21,6 +21,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/Grandis-2/nova-loadtest/config"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/clock"
@@ -510,5 +511,71 @@ func TestCredentialSource(t *testing.T) {
 		if err := credentialSource(tc.server, tc.role, tc.url); (err == nil) != tc.ok {
 			t.Errorf("%+v: %v", tc, err)
 		}
+	}
+}
+
+type fakeSTS struct {
+	account string
+	err     error
+}
+
+func (f fakeSTS) GetCallerIdentity(context.Context, *sts.GetCallerIdentityInput, ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &sts.GetCallerIdentityOutput{Account: aws.String(f.account)}, nil
+}
+
+// 계정 ID 를 가린다. GitHub 에서 알아내지 못하면 실패하고, 로컬(moto)에서는 넘어간다
+func TestMaskAccount(t *testing.T) {
+	var out bytes.Buffer
+	if err := MaskAccount(context.Background(), fakeSTS{account: "123456789012"}, &out, true); err != nil || out.String() != "::add-mask::123456789012\n" {
+		t.Fatalf("%q %v", out.String(), err)
+	}
+	if err := MaskAccount(context.Background(), fakeSTS{err: errors.New("denied")}, &out, true); err == nil {
+		t.Fatal("GitHub 에서 계정 ID 를 모르면 실패해야 한다")
+	}
+	if err := MaskAccount(context.Background(), fakeSTS{err: errors.New("denied")}, &out, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 실행 로그에는 태스크 ARN(계정 ID 포함) 대신 태스크 ID 만 찍는다
+func TestRunLogsTaskIDOnly(t *testing.T) {
+	f := newRun(t, `{"test_id":"lt-20261020t0600-1","scenario":"smoke","result":"pass"}`)
+	if err := Run(context.Background(), f.env, cfg(t)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.out.String(), "arn:aws:ecs") {
+		t.Fatalf("실행 로그에 태스크 ARN 이 있다:\n%s", f.out.String())
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+// 역할을 맡기 전에 역할 ARN 의 계정 ID 부터 가린다. 가리기 명령을 쓰지 못하면 실패한다
+func TestMaskBeforeAssume(t *testing.T) {
+	var out bytes.Buffer
+	if err := maskARNAccount(&out, "arn:aws:iam::123456789012:role/nova-prod-loadtest-github-run"); err != nil || out.String() != "::add-mask::123456789012\n" {
+		t.Fatalf("%q %v", out.String(), err)
+	}
+	out.Reset()
+	if err := maskARNAccount(&out, ""); err != nil || out.Len() != 0 {
+		t.Fatalf("역할 ARN 이 없으면(로컬) 아무것도 하지 않는다: %q %v", out.String(), err)
+	}
+	if err := maskARNAccount(failWriter{}, "arn:aws:iam::123456789012:role/x"); err == nil {
+		t.Fatal("가리기 명령을 쓰지 못하면 실패해야 한다")
+	}
+	if err := MaskAccount(context.Background(), fakeSTS{account: "123456789012"}, failWriter{}, true); err == nil {
+		t.Fatal("가리기 명령을 쓰지 못하면 실패해야 한다")
+	}
+}
+
+func TestRedact(t *testing.T) {
+	got := Redact("AccessDenied: arn:aws:sts::123456789012:assumed-role/x is not authorized (요청 1234)")
+	if strings.Contains(got, "123456789012") || !strings.Contains(got, "요청 1234") {
+		t.Fatal(got)
 	}
 }

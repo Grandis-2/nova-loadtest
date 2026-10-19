@@ -102,19 +102,14 @@ jobs:
             exit 1
           fi
 
-      - name: ecr login
-        run: '"$RUNNER_TEMP/gha" ecr-login'
-
       - name: idle check
         run: '"$RUNNER_TEMP/gha" idle'
 
+      # 커밋 태그의 매니페스트를 latest 로 다시 쓴다(레이어를 읽지 않아 빌드 역할 권한 안에서 된다).
       # 옮기는 데 몇 초 걸린다. 그 사이에 시험이 시작됐으면 이미지가 섞였을 수 있어 실패로 알린다
       - name: move latest
         run: |
-          for image in token-minter k6 controller; do
-            repo="$REGISTRY/nova/loadtest-$image"
-            docker buildx imagetools create -t "$repo:latest" "$repo:$SHA"
-          done
+          "$RUNNER_TEMP/gha" promote
           "$RUNNER_TEMP/gha" idle || {
             echo "::error::latest 를 옮기는 동안 시험이 시작됐다. 컨트롤러와 k6 의 이미지가 다를 수 있으니 그 시험을 stop.yml 로 멈추고 다시 돌린다"
             exit 1

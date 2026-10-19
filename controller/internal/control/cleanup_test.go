@@ -111,3 +111,55 @@ func TestCleanupQueueNotEmpty(t *testing.T) {
 		t.Fatalf("실패도 cleanup.json 에 남긴다: %s", b)
 	}
 }
+
+// 큐를 기다리는 동안 다른 시험이 시작하면 지우지 않는다
+func TestCleanupOtherTestStartsDuringWait(t *testing.T) {
+	f, self := cleanupFixture(t)
+	calls := 0
+	q := fakeQueues{pending: func(time.Time) int64 {
+		calls++
+		if calls == 1 {
+			f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+				return fakeecs.Behavior{RunningAfter: time.Second}
+			}
+			f.deps.Runner.Run(context.Background(), f.run.RunTask.Tasks["k6"], "lt-20261020t0700-2", nil)
+			return 5
+		}
+		return 0
+	}}
+	res, err := Cleanup(context.Background(), f.deps, q, f.run.Config, f.run.RunTask, testID, self)
+	if err == nil || res.Done || !strings.Contains(res.Reason, "다른 시험") {
+		t.Fatalf("지우기 직전에 다른 시험을 보고 멈춰야 한다: %v %+v", err, res)
+	}
+	if len(f.ecs.RunsOf(dataFam)) != 0 {
+		t.Fatal("정리 태스크를 띄우지 않아야 한다")
+	}
+}
+
+// 상품 조회만 한 시험은 product_id 가 있어도 지울 상품이 없다
+func TestCleanupCatalogOnlyHasNoTargets(t *testing.T) {
+	f, self := cleanupFixture(t)
+	in := plan.Input{TestID: testID, Scenario: "smoke", ProductID: product, Flows: []string{"catalog"}, Now: t0}
+	p, _ := plan.New(f.run.Config, in)
+	pj, _ := json.Marshal(p)
+	f.store.Put(context.Background(), "results/"+testID+"/plan.json", pj)
+	_, err := Cleanup(context.Background(), f.deps, fakeQueues{}, f.run.Config, f.run.RunTask, testID, self)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "지울 시험 상품이 없다") {
+		t.Fatalf("쓰지 않은 상품을 정리 대상으로 삼으면 안 된다: %v", err)
+	}
+}
+
+// 정리 태스크가 끝나지 않으면 무한히 기다리지 않고 멈춘 뒤 실패로 남긴다
+func TestCleanupDataTaskTimeout(t *testing.T) {
+	f, self := cleanupFixture(t)
+	f.ecs.Behave = func(string, map[string]string, int) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: time.Second}
+	}
+	res, err := Cleanup(context.Background(), f.deps, fakeQueues{}, f.run.Config, f.run.RunTask, testID, self)
+	if err == nil || res.Done || !strings.Contains(res.Reason, "끝나지 않아") {
+		t.Fatalf("시간이 지나면 실패해야 한다: %v %+v", err, res)
+	}
+	if len(f.ecs.Stops) != 1 {
+		t.Fatal("끝나지 않은 정리 태스크를 멈춰야 한다")
+	}
+}

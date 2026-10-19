@@ -33,8 +33,8 @@ type Input struct {
 	RampUp         string    `json:"ramp_up,omitempty"`
 	Runners        int       `json:"runners,omitempty"`
 	AbortErrorRate float64   `json:"abort_error_rate,omitempty"`
-	Flows          []string  `json:"flows,omitempty"` // 비면 다섯 흐름 모두
-	Now            time.Time `json:"-"`               // open_at이 너무 가까운지 볼 때만 쓴다
+	Flows          []string  `json:"flows,omitempty"`     // 비면 다섯 흐름 모두
+	Now            time.Time `json:"planned_at,omitzero"` // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
 }
 
 // Range는 회원 번호 범위 [Start, Start+Count)이다.

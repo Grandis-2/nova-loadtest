@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -35,7 +36,10 @@ type CleanupResult struct {
 // ErrRefused는 정리를 시작하지 않고 거절했다는 뜻이다(cleanup.yml 은 실패로 끝난다).
 var ErrRefused = errors.New("정리를 거절했다")
 
-const queuePoll = 30 * time.Second
+const (
+	queuePoll       = 30 * time.Second
+	dataTaskTimeout = time.Hour // 정리 태스크가 이보다 오래 돌면 멈추고 실패로 남긴다
+)
 
 // Cleanup은 시험 하나의 시험 데이터를 지운다(docs/design.md "정리").
 //
@@ -64,26 +68,21 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 	if err := json.Unmarshal(b, &p); err != nil {
 		return refuse("plan.json 을 읽지 못했다: %v", err)
 	}
-	products := uniq(p.ProductID, p.PrepProductID)
+	// 실제로 쓴 상품만 정리한다. 진입 상품은 진입 흐름이 있을 때만 쓰고, 준비 상품은 조회·결제·취소가 있을 때만 계획에 남는다
+	entryProduct := ""
+	if slices.Contains(p.Flows, "entry") {
+		entryProduct = p.ProductID
+	}
+	products := uniq(entryProduct, p.PrepProductID)
 	if len(products) == 0 {
 		return refuse("지울 시험 상품이 없다(상품 조회만 한 시험이다)")
 	}
 
 	// 다른 시험이 돌면 큐가 그 시험 때문에 비지 않고, 그 시험의 데이터를 건드릴 수 있다
-	arns, err := d.Runner.ListRunning(ctx)
-	if err != nil {
+	if other, err := otherTest(ctx, d, selfStartedBy); err != nil {
 		return nil, fmt.Errorf("시험 클러스터 보기: %w", err)
-	}
-	if len(arns) > 0 {
-		states, err := d.Runner.Describe(ctx, arns, "")
-		if err != nil {
-			return nil, fmt.Errorf("시험 클러스터 보기: %w", err)
-		}
-		for _, s := range states {
-			if s.LastStatus != "STOPPED" && s.StartedBy != selfStartedBy {
-				return refuse("다른 시험(%s)이 돌고 있다", s.StartedBy)
-			}
-		}
+	} else if other != "" {
+		return refuse("다른 시험(%s)이 돌고 있다", other)
 	}
 
 	res := &CleanupResult{TestID: testID, ProductIDs: products, Members: p.Members, StartedAt: d.Clock.Now()}
@@ -119,6 +118,13 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 		}
 	}
 
+	// 큐를 기다리는 동안 다른 시험이 시작했을 수 있다. 지우기 직전에 다시 본다
+	if other, err := otherTest(ctx, d, selfStartedBy); err != nil {
+		return done(false, "시험 클러스터를 보지 못했다: "+err.Error())
+	} else if other != "" {
+		return done(false, fmt.Sprintf("기다리는 동안 다른 시험(%s)이 시작해 지우지 않았다", other))
+	}
+
 	// 정리 태스크에 넘기는 값은 인프라 I-6 과 정한다(docs/implementation-plan.md 2.4 "정리 모드")
 	members, _ := json.Marshal(p.Members)
 	env := []runner.Env{
@@ -130,7 +136,8 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 	if err != nil {
 		return done(false, "정리 태스크를 띄우지 못했다: "+err.Error())
 	}
-	for {
+	taskDeadline := d.Clock.Now().Add(dataTaskTimeout)
+	for d.Clock.Now().Before(taskDeadline) {
 		states, err := d.Runner.Describe(ctx, []string{arn}, data.Container)
 		if err == nil && states[0].LastStatus == "STOPPED" {
 			if c := states[0].ExitCode; c != nil && *c == 0 {
@@ -142,6 +149,26 @@ func Cleanup(ctx context.Context, d Deps, q Queues, cfg *config.Config, rt *infr
 			return done(false, err.Error())
 		}
 	}
+	stopAll(ctx, d, []string{arn}, "정리 시간 초과")
+	return done(false, fmt.Sprintf("정리 태스크가 %s 안에 끝나지 않아 멈췄다", dataTaskTimeout))
+}
+
+// otherTest 는 이 컨트롤러 말고 시험 클러스터에서 도는 태스크가 있으면 그 startedBy 를 돌려준다
+func otherTest(ctx context.Context, d Deps, self string) (string, error) {
+	arns, err := d.Runner.ListRunning(ctx)
+	if err != nil || len(arns) == 0 {
+		return "", err
+	}
+	states, err := d.Runner.Describe(ctx, arns, "")
+	if err != nil {
+		return "", err
+	}
+	for _, s := range states {
+		if s.LastStatus != "STOPPED" && s.StartedBy != self {
+			return s.StartedBy, nil
+		}
+	}
+	return "", nil
 }
 
 func uniq(vs ...string) []string {

@@ -25,6 +25,7 @@ type Behavior struct {
 	ExitCode     int32
 	StopExitCode int32 // StopTask 를 받으면 이 코드로 끝난다(k6 는 105)
 	ImageDigest  string
+	HiddenFor    time.Duration // RunTask 뒤 이만큼 DescribeTasks 에 나오지 않는다(ECS 조회가 늦게 반영되는 경우)
 }
 
 // RunCall은 받은 RunTask 하나다. 덮어쓰기를 검사하는 데 쓴다.
@@ -128,6 +129,10 @@ func (f *Fake) DescribeTasks(_ context.Context, in *ecs.DescribeTasksInput, _ ..
 	out := &ecs.DescribeTasksOutput{}
 	for _, arn := range in.Tasks {
 		if t, ok := f.tasks[arn]; ok {
+			if now.Before(t.created.Add(t.b.HiddenFor)) {
+				out.Failures = append(out.Failures, types.Failure{Arn: aws.String(arn), Reason: aws.String("MISSING")})
+				continue
+			}
 			st, code := t.status(now)
 			started := t.created.Add(t.b.RunningAfter)
 			out.Tasks = append(out.Tasks, types.Task{

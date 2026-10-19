@@ -88,7 +88,7 @@ flowchart LR
 | `MODE` | `run`(시험) 또는 `cleanup`(정리) |
 | `TEST_ID` | 시험 ID. 정리 모드에서는 정리할 시험의 ID이고, 컨트롤러의 `startedBy`는 `<시험 ID>-c`이다 |
 | `RUN_TASK`, `OBSERVABILITY` | SSM 두 파라미터의 JSON. 컨트롤러는 SSM을 직접 읽지 않는다 |
-| `INPUT_JSON` | 워크플로 입력(`test_id`, `scenario`, `product_id` 등). 컨트롤러가 계획을 다시 계산한다 |
+| `INPUT_JSON` | 워크플로 입력(`test_id`, `scenario`, `product_id` 등)과 러너가 계획한 시각(`planned_at`). 컨트롤러는 이 시각으로 계획을 다시 계산한다. 컨트롤러가 몇 분 늦게 떠도 `open_at` 검사가 러너와 같게 나오게 하려는 것이다 |
 | `PLAN_JSON` | 러너가 계산한 계획. 다시 계산한 계획과 다르면 아무것도 띄우지 않고 멈춘다 |
 | `BASE_URL` | 부하를 보낼 API 주소 |
 

@@ -2,6 +2,7 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -28,13 +29,38 @@ var labels = map[Result]string{
 // Success는 워크플로를 성공으로 끝낼지다. 합격과, stress의 한계 측정만 성공이다.
 func (r Result) Success() bool { return r == Pass || r == Limit }
 
+// Ratio는 비율이다. 요청이 없으면 NaN(0/0)인데 JSON 은 NaN 을 담지 못하므로 null 로 쓴다.
+// 그렇지 않으면 summary.json 을 만들지 못해 결과가 통째로 사라진다
+type Ratio float64
+
+func (r Ratio) MarshalJSON() ([]byte, error) {
+	if math.IsNaN(float64(r)) || math.IsInf(float64(r), 0) {
+		return []byte("null"), nil
+	}
+	return json.Marshal(float64(r))
+}
+
+func (r *Ratio) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*r = Ratio(math.NaN())
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*r = Ratio(f)
+	return nil
+}
+
 // Check는 기준 하나의 값과 합격 여부다.
 type Check struct {
-	Name     string  `json:"name"` // 전체는 "all", 그 밖에는 요청 이름(경로 템플릿)
+	Name     string  `json:"name"` // 전체는 "all", 흐름 확인은 "flow:<흐름>", 그 밖에는 요청 이름(경로 템플릿)
 	Requests float64 `json:"requests"`
-	Within   float64 `json:"within_500ms"`
-	Rate5xx  float64 `json:"rate_5xx"`
+	Within   Ratio   `json:"within_500ms"`
+	Rate5xx  Ratio   `json:"rate_5xx"`
 	Pass     bool    `json:"pass"`
+	Note     string  `json:"note,omitempty"`
 }
 
 // Window는 판정 구간 하나의 결과다.
@@ -99,7 +125,7 @@ func (s Summary) Markdown(grafanaURL string) string {
 		fmt.Fprintf(&b, "\n**구간 %s** (%s)\n\n| 요청 | 요청 수 | 0.5초 안 | 5xx | 판정 |\n|---|---|---|---|---|\n", w.Name, mark(w.Pass))
 		rows := append([]Check{w.Overall}, w.ByName...)
 		for _, c := range rows {
-			fmt.Fprintf(&b, "| %s | %.0f | %s | %s | %s |\n", c.Name, c.Requests, pct(c.Within), pct(c.Rate5xx), mark(c.Pass))
+			fmt.Fprintf(&b, "| %s | %.0f | %s | %s | %s |\n", c.Name+note(c.Note), c.Requests, pct(float64(c.Within)), pct(float64(c.Rate5xx)), mark(c.Pass))
 		}
 	}
 	if len(s.Tasks) > 0 {
@@ -115,6 +141,13 @@ func (s Summary) Markdown(grafanaURL string) string {
 		}
 	}
 	return b.String()
+}
+
+func note(n string) string {
+	if n == "" {
+		return ""
+	}
+	return " (" + n + ")"
 }
 
 func mark(ok bool) string {

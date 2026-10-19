@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -105,11 +106,7 @@ func (m *fakeMetrics) Coverage(_ context.Context, start, end time.Time) (map[str
 }
 
 func (m *fakeMetrics) Window(_ context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error) {
-	by := map[string]mimir.Stat{
-		"/api/v1/products":                     {Requests: 1000, Within: 0.99},
-		"/api/v1/orders":                       {Requests: 100, Within: 0.98},
-		"/api/v1/orders/{id}/payment-attempts": {Requests: 100, Within: 0.97},
-	}
+	by := allFlows(0.99)
 	if m.window != nil {
 		by = m.window(start, end)
 	}
@@ -121,6 +118,16 @@ func (m *fakeMetrics) Window(_ context.Context, start, end time.Time) (mimir.Sta
 	}
 	total.Within = w / total.Requests
 	return total, by, nil
+}
+
+// allFlows 는 다섯 흐름의 대표 요청이 모두 있는 구간 값이다
+func allFlows(within float64) map[string]mimir.Stat {
+	out := map[string]mimir.Stat{}
+	for _, name := range flowName {
+		out[name] = mimir.Stat{Requests: 100, Within: within}
+	}
+	out["/api/v1/products"] = mimir.Stat{Requests: 1000, Within: within}
+	return out
 }
 
 type fixture struct {
@@ -216,10 +223,10 @@ func TestPass(t *testing.T) {
 func TestFailPaymentFlow(t *testing.T) {
 	f := newFixture(t, "smoke", nil)
 	f.metrics.window = func(time.Time, time.Time) map[string]mimir.Stat {
-		return map[string]mimir.Stat{
-			"/api/v1/products":                     {Requests: 10000, Within: 0.999},
-			"/api/v1/orders/{id}/payment-attempts": {Requests: 100, Within: 0.90},
-		}
+		by := allFlows(0.999)
+		by["/api/v1/products"] = mimir.Stat{Requests: 10000, Within: 0.999}
+		by["/api/v1/orders/{id}/payment-attempts"] = mimir.Stat{Requests: 100, Within: 0.90}
+		return by
 	}
 	s := f.execute(t)
 	expect(t, s, report.Fail, "기준을 넘었다")
@@ -376,7 +383,7 @@ func TestK6Overrides(t *testing.T) {
 		if r.Env["TASK_INDEX"] != fmt.Sprint(i) || r.Env["TOKENS_URI"] != "s3://bucket-x/tokens/"+testID+"/" {
 			t.Fatalf("태스크 번호와 토큰 위치: %v", r.Env)
 		}
-		if runner.OverrideSize(envList(r.Env)) > runner.MaxOverrideBytes {
+		if runner.OverrideSize("k6", envList(r.Env)) > runner.MaxOverrideBytes {
 			t.Fatal("덮어쓰기가 8KiB 를 넘는다")
 		}
 	}
@@ -402,7 +409,7 @@ func TestStressLimit(t *testing.T) {
 		if !start.Before(mainStart.Add(10 * time.Minute)) {
 			within = 0.8
 		}
-		return map[string]mimir.Stat{"/api/v1/products": {Requests: 1000, Within: within}}
+		return allFlows(within)
 	}
 	s := f.execute(t)
 	expect(t, s, report.Limit, "")
@@ -435,5 +442,110 @@ func TestPlanMismatch(t *testing.T) {
 	}
 	if len(f.ecs.Runs) != 0 {
 		t.Fatal("아무것도 띄우지 않아야 한다")
+	}
+}
+
+// 리뷰(#4)에서 나온 경우들
+
+// 구간에 요청이 하나도 없으면 비율이 NaN 이다. 그래도 summary.json 을 남기고 불합격이어야 한다
+func TestNoRequestsStillRecords(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	f.metrics.window = func(time.Time, time.Time) map[string]mimir.Stat {
+		return map[string]mimir.Stat{"/api/v1/products": {Requests: 0, Within: math.NaN(), Rate5xx: math.NaN()}}
+	}
+	s := f.execute(t)
+	expect(t, s, report.Fail, "")
+	b, _ := f.store.Get(context.Background(), "results/"+testID+"/summary.json")
+	if !strings.Contains(string(b), `"within_500ms": null`) {
+		t.Fatalf("NaN 은 null 로 남긴다: %s", b)
+	}
+}
+
+// 계획한 흐름 하나의 요청이 통째로 없으면 나머지가 좋아도 불합격이다
+func TestMissingFlowFails(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	f.metrics.window = func(time.Time, time.Time) map[string]mimir.Stat {
+		by := allFlows(0.99)
+		delete(by, flowName["cancel"])
+		return by
+	}
+	s := f.execute(t)
+	expect(t, s, report.Fail, "")
+	found := false
+	for _, c := range s.Windows[0].ByName {
+		found = found || (c.Name == "flow:cancel" && !c.Pass)
+	}
+	if !found {
+		t.Fatalf("flow:cancel 이 미달로 나와야 한다: %+v", s.Windows[0].ByName)
+	}
+}
+
+// 끝 시각 근처라도 0, 99 가 아닌 종료 코드(예: 107 스크립트 오류)는 정상 종료가 아니다
+func TestBadExitAtEnd(t *testing.T) {
+	f := newFixture(t, "smoke", func(_ map[string]string, _ int, end time.Time) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end, ExitCode: 107, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	expect(t, f.execute(t), report.Aborted, "종료 코드 107")
+}
+
+// stress 에서 k6 가 임계치(오류율)로 먼저 멈춰도 한계 측정이다
+func TestStressK6ThresholdIsLimit(t *testing.T) {
+	f := newFixture(t, "stress", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
+		start, _ := time.Parse(time.RFC3339, env["START_AT"])
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(18 * time.Minute), ExitCode: 99, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	s := f.execute(t)
+	expect(t, s, report.Limit, "임계치")
+	if s.LastPassingStep == "" {
+		t.Fatal("멈추기 전에 끝난 단계를 판정해야 한다")
+	}
+}
+
+// ECS 조회가 늦게 반영돼 방금 띄운 태스크가 잠시 안 보여도 시험을 취소하지 않는다
+func TestDescribeLagDoesNotCancel(t *testing.T) {
+	f := newFixture(t, "smoke", func(_ map[string]string, _ int, end time.Time) fakeecs.Behavior {
+		return fakeecs.Behavior{HiddenFor: 20 * time.Second, RunningAfter: 30 * time.Second, ExitAt: end, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	expect(t, f.execute(t), report.Pass, "")
+}
+
+// 컨트롤러가 늦게 떠도 러너가 계획한 시각으로 다시 계산한다. 시작 시각이 촉박하면 결과(취소)를 남긴다
+func TestPlannedAtUsedForRecompute(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	in := plan.Input{TestID: testID, Scenario: "spike", ProductID: product, PrepProductID: "a1b2c3d4-0000-4000-8000-000000000002",
+		OpenAt: t0.Add(5 * time.Minute).Format(time.RFC3339), Now: t0}
+	p, err := plan.New(f.run.Config, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pj, _ := json.Marshal(p)
+	f.run.Input, f.run.PlanJSON = in, string(pj)
+	f.clock.Sleep(context.Background(), 3*time.Minute) // 컨트롤러가 3분 늦게 떴다
+	s := f.execute(t)
+	expect(t, s, report.Canceled, "너무 가깝다")
+	if len(f.ecs.Runs) != 0 {
+		t.Fatal("시작 시각이 촉박하면 아무것도 띄우지 않는다")
+	}
+}
+
+// k6 를 띄우지 못한 태스크의 결과 파일에는 요약이 없다. 요약 있음으로 보면 안 된다
+func TestTaskResultWithoutSummary(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	f.store.Put(context.Background(), "results/"+testID+"/k6-0.json", []byte(`{"exit_code":120,"error":"토큰 받기 실패"}`))
+	s := f.execute(t)
+	if s.Tasks[0].Summary || s.Tasks[0].Error != "토큰 받기 실패" {
+		t.Fatalf("요약이 없는 결과다: %+v", s.Tasks[0])
+	}
+}
+
+// 멈춘 뒤 모든 태스크가 STOPPED 가 될 때까지 기다려 종료 코드를 남긴다
+func TestAbortRecordsExitCodes(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	f.metrics.errRate = func(time.Time) (float64, error) { return 0.2, nil }
+	s := f.execute(t)
+	for _, task := range s.Tasks {
+		if task.ExitCode == nil || *task.ExitCode != 105 {
+			t.Fatalf("멈춘 태스크의 종료 코드(105)를 남겨야 한다: %+v", task)
+		}
 	}
 }

@@ -7,6 +7,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -47,18 +48,24 @@ type Runner struct {
 // Env는 컨테이너 환경 변수 하나다.
 type Env struct{ Name, Value string }
 
-// OverrideSize는 덮어쓰기 크기를 센다. RunTask 상한(8KiB)을 넘는지 미리 볼 때 쓴다.
-func OverrideSize(env []Env) int {
-	n := 0
-	for _, e := range env {
-		n += len(e.Name) + len(e.Value)
+// OverrideSize는 덮어쓰기를 JSON 으로 바꾼 크기다. ECS 는 구조와 따옴표 이스케이프까지 포함한 JSON 길이로
+// 8KiB 를 센다. 이름과 값의 길이만 더하면 PLAN_JSON 처럼 따옴표가 많은 값에서 실제보다 작게 나온다.
+func OverrideSize(container string, env []Env) int {
+	type kv struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
 	}
-	return n
+	list := make([]kv, len(env))
+	for i, e := range env {
+		list[i] = kv{e.Name, e.Value}
+	}
+	b, _ := json.Marshal(map[string]any{"containerOverrides": []any{map[string]any{"name": container, "environment": list}}})
+	return len(b)
 }
 
 // Run은 태스크 한 대를 띄우고 ARN을 돌려준다.
 func (r *Runner) Run(ctx context.Context, t infra.Task, startedBy string, env []Env) (string, error) {
-	if n := OverrideSize(env); n > MaxOverrideBytes {
+	if n := OverrideSize(t.Container, env); n > MaxOverrideBytes {
 		return "", fmt.Errorf("%s 덮어쓰기가 %d바이트로 RunTask 상한 %d바이트를 넘는다", t.Container, n, MaxOverrideBytes)
 	}
 	kv := make([]types.KeyValuePair, len(env))
@@ -103,8 +110,13 @@ func (r *Runner) Run(ctx context.Context, t infra.Task, startedBy string, env []
 
 func capacityShort(reason string) bool {
 	r := strings.ToLower(reason)
-	return strings.Contains(r, "capacity") || strings.Contains(r, "throttl") || strings.Contains(r, "rate exceeded")
+	// Fargate: "Capacity is unavailable", EC2 계열: "RESOURCE:CPU", "RESOURCE:MEMORY", "RESOURCE:ENI"
+	return strings.Contains(r, "capacity") || strings.Contains(r, "resource:") ||
+		strings.Contains(r, "throttl") || strings.Contains(r, "rate exceeded")
 }
+
+// Missing은 DescribeTasks 가 아직 태스크를 돌려주지 않은 상태다.
+const Missing = "MISSING"
 
 // State는 태스크 하나의 상태다.
 type State struct {
@@ -145,7 +157,8 @@ func (r *Runner) Describe(ctx context.Context, arns []string, container string) 
 	for i, a := range arns {
 		s, ok := byARN[a]
 		if !ok {
-			s = State{ARN: a, LastStatus: "STOPPED", StoppedReason: "태스크를 찾지 못했다"}
+			// ECS 조회는 늦게 반영될 수 있어, 방금 띄운 태스크가 잠시 보이지 않는다. 멈춘 것으로 보지 않는다
+			s = State{ARN: a, LastStatus: Missing}
 		}
 		states[i] = s
 	}

@@ -82,7 +82,11 @@ func resultsKey(testID, name string) string { return "results/" + testID + "/" +
 // Execute는 시험을 끝까지 진행하고 결과를 기록한다.
 func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	id := r.Input.TestID
-	r.Input.Now = d.Clock.Now()
+	// 러너가 계획한 시각(planned_at)으로 다시 계산한다. 컨트롤러는 몇 분 늦게 뜰 수 있어 지금 시각으로 계산하면
+	// open_at 검사에서 러너와 다르게 거절할 수 있다. 시작 시각이 촉박한지는 아래에서 따로 보고 취소 결과를 남긴다
+	if r.Input.Now.IsZero() {
+		r.Input.Now = d.Clock.Now()
+	}
 	p, err := plan.New(r.Config, r.Input)
 	if err != nil {
 		return nil, fmt.Errorf("계획을 다시 계산하지 못했다: %w", err)
@@ -131,6 +135,8 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	}
 
 	outcome := monitor(ctx, d, r, p, arns, startAt)
+	// 멈춘 태스크의 종료 코드와 k6 요약은 stopTimeout 안에 나온다. 다 멈출 때까지 기다린 뒤 모은다
+	waitStopped(ctx, d, r, arns)
 	s.Tasks = taskResults(ctx, d, r, id, arns)
 	switch outcome.result {
 	case report.Inconclusive:
@@ -219,6 +225,35 @@ func mintTokens(ctx context.Context, d Deps, r Run, p *plan.Plan) string {
 	}
 	stopAll(ctx, d, []string{arn}, "토큰 발급 시간 초과")
 	return fmt.Sprintf("토큰 발급이 %s 안에 끝나지 않았다", minterTimeout)
+}
+
+func coalesce(a, b *int32) *int32 {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
+// waitStopped 는 태스크가 모두 STOPPED 가 될 때까지(최대 stopTimeout + 30초) 기다린다
+func waitStopped(ctx context.Context, d Deps, r Run, arns []string) {
+	ctx = context.WithoutCancel(ctx)
+	deadline := d.Clock.Now().Add(stopTimeout + 30*time.Second)
+	for d.Clock.Now().Before(deadline) {
+		states, err := d.Runner.Describe(ctx, arns, r.RunTask.Tasks["k6"].Container)
+		if err == nil {
+			done := true
+			for _, s := range states {
+				done = done && s.LastStatus == "STOPPED"
+			}
+			if done {
+				return
+			}
+		}
+		if d.Clock.Sleep(ctx, 5*time.Second) != nil {
+			return
+		}
+	}
+	d.Logf("k6 태스크가 %s 안에 모두 멈추지 않았다", stopTimeout+30*time.Second)
 }
 
 func code(c *int32) string {
@@ -373,7 +408,8 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 				if now.Before(plannedEnd.Add(-endTolerance)) {
 					switch c := s.ExitCode; {
 					case c != nil && *c == 99:
-						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 임계치로 멈췄다(99)", i), false)
+						// k6 임계치는 컨트롤러의 오류율 중단 기준과 같은 기준이다. stress 에서는 한계 측정으로 본다
+						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 임계치로 멈췄다(99)", i), true)
 					case c != nil && *c == 105:
 						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 밖에서 멈췄다(105, stop.yml)", i), false)
 					default:
@@ -382,6 +418,12 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 				}
 			}
 			if stopped == len(states) {
+				// 끝 시각 근처에 끝났어도 0(정상)과 99(임계치, 판정은 Mimir 로 한다)가 아니면 정상 종료가 아니다
+				for i, s := range states {
+					if c := s.ExitCode; c == nil || (*c != 0 && *c != 99) {
+						return outcome{report.Aborted, fmt.Sprintf("k6 태스크 %d가 종료 코드 %s로 끝났다(%s)", i, code(c), s.StoppedReason), now, false}
+					}
+				}
 				return outcome{at: now}
 			}
 		}
@@ -460,7 +502,18 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 			return nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
 		}
 		rw := report.Window{Name: w.Name, Start: start, End: end, Overall: check("all", total, cfg.SLO)}
+		if !(total.Requests > 0) {
+			rw.Overall.Pass, rw.Overall.Note = false, "요청이 없다"
+		}
 		rw.Pass = rw.Overall.Pass
+		// 계획한 흐름마다 대표 요청이 있어야 한다. 흐름 하나가 통째로 빠져도 남은 흐름만으로 합격하지 않게 한다
+		for _, f := range p.Flows {
+			name := flowName[f]
+			if st, ok := byName[name]; !ok || !(st.Requests > 0) {
+				rw.ByName = append(rw.ByName, report.Check{Name: "flow:" + f, Pass: false, Note: name + " 요청이 없다"})
+				rw.Pass = false
+			}
+		}
 		for _, name := range sortedNames(byName) {
 			c := check(name, byName[name], cfg.SLO)
 			rw.ByName = append(rw.ByName, c)
@@ -472,10 +525,19 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 	return out, ""
 }
 
+// flowName 은 흐름마다 반드시 보내는 요청이다(k6/lib/flows)
+var flowName = map[string]string{
+	"catalog":   "/api/v1/products",
+	"preorders": "/api/v1/preorders/active",
+	"entry":     "/api/v1/preorders/queue",
+	"order":     "/api/v1/orders",
+	"cancel":    "/api/v1/preorders/{id}/cancel",
+}
+
 // check 는 기준 하나를 판정한다. p95 판정은 "0.5초 안에 끝난 요청이 95% 이상인가"다. 500ms 가 히스토그램 버킷
 // 경계라 이 비율은 근사 없이 정확하다(docs/design.md "결과 합치기와 판정"). 경계는 metrics.le_500 이다
 func check(name string, st mimir.Stat, slo config.SLO) report.Check {
-	c := report.Check{Name: name, Requests: st.Requests, Within: st.Within, Rate5xx: st.Rate5xx}
+	c := report.Check{Name: name, Requests: st.Requests, Within: report.Ratio(st.Within), Rate5xx: report.Ratio(st.Rate5xx)}
 	if !(st.Requests > 0) {
 		// 요청이 없으면 이 이름은 판정하지 않는다
 		c.Pass = true
@@ -543,20 +605,23 @@ func taskResults(ctx context.Context, d Deps, r Run, testID string, arns []strin
 		var res struct {
 			ExitCode *int32 `json:"exit_code"`
 			Error    string `json:"error"`
-			Summary  struct {
+			Summary  *struct {
 				Metrics map[string]struct {
 					Values map[string]float64 `json:"values"`
 				} `json:"metrics"`
 			} `json:"summary"`
 		}
-		if json.Unmarshal(b, &res) == nil {
+		if json.Unmarshal(b, &res) != nil {
+			t.Error = "k6 요약을 읽지 못했다"
+		} else if res.Summary == nil {
+			// k6 를 띄우지 못했거나(토큰 받기 실패 등) 요약을 쓰지 못한 경우다. 결과 파일에는 그 까닭이 있다
+			t.ExitCode, t.Error = coalesce(t.ExitCode, res.ExitCode), res.Error
+		} else {
 			t.Summary = true
 			t.Error = res.Error
 			t.Requests = res.Summary.Metrics["http_reqs"].Values["count"]
 			t.Failed = res.Summary.Metrics["http_req_failed"].Values["passes"]
-			if t.ExitCode == nil {
-				t.ExitCode = res.ExitCode
-			}
+			t.ExitCode = coalesce(t.ExitCode, res.ExitCode)
 		}
 		out[i] = t
 	}

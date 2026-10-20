@@ -64,6 +64,10 @@ function waitRegistered(member, preorderId, acceptedAt) {
     seen = n;
     const mine = page.items.find((x) => x.kind === 'PREORDER_REGISTERED' && x.target && x.target.id === preorderId);
     if (mine) {
+      // 조회가 느려 기한을 넘긴 뒤에 찾았으면 늦은 알림이다. 제때 받은 것으로 세지 않는다
+      if (Date.now() > deadline) {
+        return false;
+      }
       acceptToNotified.add(Date.now() - acceptedAt);
       return true;
     }

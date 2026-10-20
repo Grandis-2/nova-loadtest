@@ -43,6 +43,7 @@ type Metrics interface {
 	LastSeen(ctx context.Context, at time.Time) (map[string]float64, error)
 	Coverage(ctx context.Context, start, end time.Time) (map[string]float64, error)
 	Window(ctx context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error)
+	Scenarios(ctx context.Context, start, end time.Time) (map[string]float64, error)
 }
 
 // 감시 규칙
@@ -543,6 +544,18 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 				rw.Pass = false
 			}
 		}
+		// 요청 이름은 흐름끼리 겹친다(예약 목록은 조회 흐름과 진입의 접수가 같은 이름이다). 그래서 k6 시나리오마다도 요청이
+		// 있어야 한다. 준비(prepare)를 뺀 시나리오는 모든 판정 구간에 걸쳐 돈다. 준비는 판정 구간 앞에서 끝난다
+		byScenario, err := d.Metrics.Scenarios(ctx, start, end)
+		if err != nil {
+			return nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
+		}
+		for _, s := range p.Scenarios {
+			if s.Flow != "prepare" && !(byScenario[s.Name] > 0) {
+				rw.ByName = append(rw.ByName, report.Check{Name: "scenario:" + s.Name, Pass: false, Note: "요청이 없다"})
+				rw.Pass = false
+			}
+		}
 		for _, name := range sortedNames(byName) {
 			c := check(name, byName[name], cfg.SLO)
 			rw.ByName = append(rw.ByName, c)
@@ -557,7 +570,7 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 // flowName 은 흐름마다 반드시 보내는 요청이다(k6/lib/flows)
 var flowName = map[string]string{
 	"catalog":   "/api/v1/products",
-	"preorders": "/api/v1/preorders/active",
+	"preorders": "/api/v1/preorders", // 화면은 /active 를 부르지 않는다. 접수(POST)와 같은 이름이라 시나리오로도 본다
 	"entry":     "/api/v1/preorders/queue",
 	"order":     "/api/v1/orders",
 	"cancel":    "/api/v1/preorders/{id}/cancel",

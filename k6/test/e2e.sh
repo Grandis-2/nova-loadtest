@@ -129,7 +129,7 @@ case "$mode" in
     for r in "GET /api/v1/products" "GET /api/v1/products/{id}" "GET /api/v1/categories" \
       "GET /api/v1/products/{id}/reviews" "GET /api/v1/preorders/products/{id}/shipment-batches" \
       "POST /api/v1/preorders/queue" "GET /api/v1/preorders/queue" "POST /api/v1/preorders" "GET /api/v1/preorders" \
-      "GET /api/v1/preorders/active" "POST /api/v1/preorders/{id}/cancel" "POST /api/v1/orders" "POST /api/v1/orders/{id}/payment-attempts"; do
+      "GET /api/v1/promotions" "GET /api/v1/promotions/{id}" "GET /api/v1/preorders/{id}" "POST /api/v1/preorders/{id}/cancel" "POST /api/v1/orders" "POST /api/v1/orders/{id}/payment-attempts"; do
       n=$(route_count "$r")
       expect "경로를 불렀다: $r ($n번)" "$([ "$n" -gt 0 ] && echo yes || echo no)" yes
     done

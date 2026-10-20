@@ -77,6 +77,7 @@ func TestQueriesUseConfiguredNames(t *testing.T) {
 	m.Rate5xx(ctx, now)
 	m.LastSeen(ctx, now)
 	m.Coverage(ctx, now.Add(-5*time.Minute), now)
+	m.Scenarios(ctx, now.Add(-5*time.Minute), now)
 	for _, q := range rec.queries {
 		if !strings.Contains(q, `test_id="lt-20261020t0630-1"`) || !strings.Contains(q, `job="loadtest/k6"`) {
 			t.Errorf("시험 ID와 job으로 걸러야 한다: %s", q)
@@ -90,6 +91,9 @@ func TestQueriesUseConfiguredNames(t *testing.T) {
 	}
 	if !strings.Contains(rec.queries[3], "sum by (instance) (count_over_time(k6_vus") || !strings.Contains(rec.queries[3], "[300s]") {
 		t.Errorf("구간 누락은 태스크별 표본 수로 본다: %s", rec.queries[3])
+	}
+	if !strings.Contains(rec.queries[4], "sum by (scenario) (increase(k6_http_reqs_total{") || !strings.Contains(rec.queries[4], "[300s]") {
+		t.Errorf("흐름이 빠졌는지는 시나리오별 요청 수로도 본다: %s", rec.queries[4])
 	}
 }
 

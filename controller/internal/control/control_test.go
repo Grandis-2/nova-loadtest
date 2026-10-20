@@ -70,7 +70,9 @@ type fakeMetrics struct {
 	seen    func(at time.Time) (map[string]float64, error)
 	cov     func(start, end time.Time) map[string]float64
 	window  func(start, end time.Time) map[string]mimir.Stat
-	queried bool
+	// scenarios 가 nil 이면 모든 k6 시나리오가 요청을 보냈다
+	scenarios func() map[string]float64
+	queried   bool
 }
 
 func (m *fakeMetrics) ErrorRate(_ context.Context, at time.Time) (float64, error) {
@@ -118,6 +120,22 @@ func (m *fakeMetrics) Window(_ context.Context, start, end time.Time) (mimir.Sta
 	}
 	total.Within = w / total.Requests
 	return total, by, nil
+}
+
+func (m *fakeMetrics) Scenarios(context.Context, time.Time, time.Time) (map[string]float64, error) {
+	if m.scenarios != nil {
+		return m.scenarios(), nil
+	}
+	return allScenarios(), nil
+}
+
+// allScenarios 는 계획이 만드는 k6 시나리오가 모두 요청을 보낸 구간 값이다
+func allScenarios() map[string]float64 {
+	out := map[string]float64{}
+	for _, n := range []string{"catalog", "preorders", "entry", "order", "cancel", "entry_burst", "entry_observe", "rush"} {
+		out[n] = 100
+	}
+	return out
 }
 
 // allFlows 는 다섯 흐름의 대표 요청이 모두 있는 구간 값이다
@@ -480,6 +498,26 @@ func TestMissingFlowFails(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("flow:cancel 이 미달로 나와야 한다: %+v", s.Windows[0].ByName)
+	}
+}
+
+// 예약 조회 흐름의 대표 요청(예약 목록)은 진입의 접수와 이름이 같다. 이름으로는 있어 보여도 시나리오가 요청을 보내지
+// 않았으면 불합격이다
+func TestMissingScenarioFails(t *testing.T) {
+	f := newFixture(t, "smoke", nil)
+	f.metrics.scenarios = func() map[string]float64 {
+		by := allScenarios()
+		delete(by, "preorders")
+		return by
+	}
+	s := f.execute(t)
+	expect(t, s, report.Fail, "")
+	found := false
+	for _, c := range s.Windows[0].ByName {
+		found = found || (c.Name == "scenario:preorders" && !c.Pass)
+	}
+	if !found {
+		t.Fatalf("scenario:preorders 가 미달로 나와야 한다: %+v", s.Windows[0].ByName)
 	}
 }
 

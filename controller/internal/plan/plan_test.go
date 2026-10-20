@@ -147,7 +147,6 @@ func TestRejects(t *testing.T) {
 		{"VU 상한 초과(spike 몰림 2만 명)", with("spike", func(in *Input) { in.PeakRPS = 2000 }), "VU"},
 		{"runners가 계산보다 적다", with("spike", func(in *Input) { in.Runners = 1 }), "runners"},
 		{"max_tasks 초과", with("load", func(in *Input) { in.Runners = 99 }), "max_tasks"},
-		{"spike에 open_at이 없다", with("spike", func(in *Input) { in.OpenAt = "" }), "open_at"},
 		{"spike의 open_at이 너무 가깝다", with("spike", func(in *Input) { in.OpenAt = "2026-10-20T00:03:00Z" }), "준비 구간을 돌릴 시간"},
 		{"spike에 prep_product_id가 없다", with("spike", func(in *Input) { in.PrepProductID = "" }), "prep_product_id"},
 		{"spike의 두 상품이 같다", with("spike", func(in *Input) { in.PrepProductID = product }), "prep_product_id"},
@@ -175,7 +174,7 @@ func TestSeriesLimit(t *testing.T) {
 
 func TestWAFLimit(t *testing.T) {
 	c := cfg(t)
-	c.Flows["catalog"] = config.Flow{Weight: 80, Pool: config.PoolNone, Requests: 15, IterationSeconds: 2} // 기본(7.7건)의 두 배 가까이
+	c.Flows["catalog"] = config.Flow{Weight: 80, Pool: config.PoolNone, Requests: 15, IterationSeconds: 2} // 기본(7.9건)의 두 배 가까이
 	mustReject(t, c, input("smoke"), "WAF")
 }
 
@@ -353,7 +352,9 @@ func TestSpikeBackgroundStartsWithMain(t *testing.T) {
 func TestWAFWindow(t *testing.T) {
 	c := cfg(t)
 	p := mustPlan(t, c, input("smoke"))
-	prep := float64(p.Members.B.Count + p.Members.C.Count)
+	// 준비는 등록 확인을 보내지 않는다
+	e := c.Flows["entry"]
+	prep := float64(p.Members.B.Count+p.Members.C.Count) * (e.Requests - e.RegisterRequests)
 	wait := c.Members.RegisterWait.D().Seconds()
 	main := float64(p.MainEnd - p.MainStart)
 	want := math.Max(p.Estimates.PeakWAFRPS*math.Min(300, main), prep+p.Estimates.PeakWAFRPS*math.Min(main, 300-wait))
@@ -458,4 +459,38 @@ func TestRushWithoutPayment(t *testing.T) {
 	if strings.Join(p.Flows, ",") != "catalog,entry" {
 		t.Fatalf("흐름 %v", p.Flows)
 	}
+}
+
+// open_at 이 없는 spike 는 이미 열린 상품으로 본다. 준비 구간이 끝나는 대로 몰림을 시작하고, 준비도 같은 상품에 할 수 있다
+func TestSpikeOpenProduct(t *testing.T) {
+	c := cfg(t)
+	in := input("spike")
+	in.OpenAt = ""
+	in.PrepProductID = ""
+	p := mustPlan(t, c, in)
+	if p.OpenAt != "" || p.PrepProductID != product {
+		t.Fatalf("open_at 없이 같은 상품으로 준비해야 한다: open_at=%q prep=%q", p.OpenAt, p.PrepProductID)
+	}
+	start := p.StartAt(c, now)
+	if want := now.Add(c.Runner.StartDelay.D()); !start.Equal(want) {
+		t.Errorf("START_AT 은 지금 + start_delay 여야 한다: %s", start)
+	}
+	if p.MainStart <= 0 {
+		t.Error("준비 구간이 본 시험 앞에 있어야 한다")
+	}
+	burst := false
+	for _, s := range p.Scenarios {
+		if s.Name == "entry_burst" {
+			burst = true
+			if s.StartTime != secs(p.MainStart+1) {
+				t.Errorf("몰림은 본 시험 시작 + 1초다: %s", s.StartTime)
+			}
+		}
+	}
+	if !burst {
+		t.Fatal("몰림 시나리오가 있어야 한다")
+	}
+	// 같은 상품을 따로 넣어도 된다
+	in.PrepProductID = product
+	mustPlan(t, c, in)
 }

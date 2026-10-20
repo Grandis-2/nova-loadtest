@@ -1,7 +1,8 @@
-// 오픈 러시(풀 A). 몰린 회원 한 명이 상품 상세 → 진입 → 줄 → 접수까지 가고, 그중 일부는 등록 알림을 기다려
+// 오픈 러시(풀 A). 몰린 회원 한 명이 사전예약 상세 → 진입 → 줄 → 상품 상세 → 접수까지 가고, 그중 일부는
 // 주문과 결제 시도까지 이어 간다. 결제 승인은 보내지 않는다(토스 paymentKey 가 필요하다).
+// 접수 뒤 5초 안에 등록되면 화면이 바로 결제로 가고(fe waitForRegistration), 아니면 등록 알림을 기다린다.
 //
-// be (94b27657)
+// be (94b27657, 27cbb895 와 같다)
 // - 접수 202 의 data.preorderId 는 예약의 공개 토큰이다. 등록 알림의 target.id 와 같은 값이다
 // - preorder 가 REGISTERED 로 바꾸면 PREORDER_REGISTERED 알림을 만들고(NotificationRequested), member 가 저장한다
 // - 화면은 GET /api/v1/notifications/stream(SSE)으로 안 읽은 수를 받는다. k6 에는 SSE 가 없어
@@ -16,12 +17,13 @@ import { data, errorCode, req } from '../http.js';
 import { shipTo } from '../fake.js';
 import { poolA } from '../users.js';
 import { enterAndAccept } from './entry.js';
+import { promotionScreen } from './screens.js';
 import { skipped } from './skip.js';
 
 const RUSH = PLAN.rush || { pay_ratio: 0, notify_interval_seconds: 10, notify_timeout_seconds: 480 };
 const OPEN_AT_MS = PLAN.open_at ? Date.parse(PLAN.open_at) : null;
 
-// 접수부터 등록 알림을 본 때까지, 판매 오픈부터 결제 시도 응답까지 걸린 시간
+// 접수부터 등록을 확인한 때까지(5초 안에 예약 상세로 봤거나, 그 뒤 등록 알림으로 봤다), 판매 오픈부터 결제 시도 응답까지 걸린 시간
 const acceptToNotified = new Trend('accept_to_notified', true);
 const openToPayment = new Trend('open_to_payment', true);
 const outcomes = new Counter('rush_outcome');
@@ -80,8 +82,8 @@ export function rushFlow(setup) {
   if (!m) {
     return skipped('rush', 'no_member');
   }
-  // 오픈 순간 상품 상세를 새로 고친다
-  req('GET', '/api/v1/products/{id}', { path: { id: PRODUCT_ID } });
+  // 오픈 순간 사전예약 상세를 새로 고치고 "예약하기"를 누른다
+  promotionScreen(setup.promotionId);
   const accepted = enterAndAccept(m, PRODUCT_ID, setup.optionId);
   if (!accepted) {
     return outcome('not_accepted');
@@ -92,11 +94,16 @@ export function rushFlow(setup) {
   if (!accepted.preorderId) {
     return outcome('no_preorder_id');
   }
-  if (!waitRegistered(m, accepted.preorderId, Date.now())) {
-    return outcome('notify_timeout');
+  if (accepted.registered) {
+    // 등록 확인에서 REGISTERED 를 봤으면 화면이 바로 결제로 간다. 그때까지 걸린 시간을 센다(1초 단위)
+    acceptToNotified.add(accepted.registeredAt - accepted.acceptedAt);
+  } else {
+    if (!waitRegistered(m, accepted.preorderId, accepted.acceptedAt)) {
+      return outcome('notify_timeout');
+    }
+    // 알림을 눌러 내 예약 상세를 열고, 결제하기를 누른다
+    req('GET', '/api/v1/preorders/{id}', { path: { id: accepted.preorderId }, token: m.token, needBody: true });
   }
-  // 알림을 눌러 내 예약 상세를 열고, 결제하기를 누른다
-  req('GET', '/api/v1/preorders/{id}', { path: { id: accepted.preorderId }, token: m.token, needBody: true });
   const res = req('POST', '/api/v1/orders', {
     token: m.token,
     body: { source: 'PREORDER', preorderId: accepted.preorderId, shipTo: shipTo(m.n) },

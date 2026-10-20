@@ -37,7 +37,7 @@ nova-loadtest/
 │           ├── cancel.js        예약 취소(풀 C)
 │           ├── order.js         주문 생성 → 결제 시도
 │           ├── rush.js          rush: 상품 상세 → 진입·접수 → 등록 알림 기다리기 → 주문 → 결제 시도(풀 A)
-│           ├── catalog.js       상품 조회
+│           ├── catalog.js       상품 조회(홈 → 카테고리 목록·검색 → 상세와 배송 차수·리뷰)
 │           └── skip.js          요청 없이 넘어간 반복(skipped) 카운터
 ├── controller/                  컨트롤러(Go)
 │   ├── cmd/controller/          태스크 진입점
@@ -92,7 +92,7 @@ nova-loadtest/
 
 | 항목 | 내용 |
 |---|---|
-| `flows` | 흐름별 평시 비율(상품 80, 예약 조회 10, 진입 5, 결제 시도 5, 취소 1), 회원 풀, 흐름당 요청 수(계획의 예상 요청 수 계산용), 진입 상한(입장 속도 150/초의 80% = 120/초), WAF 예외 없는 시나리오의 IP당 5분 요청 상한(2,400) |
+| `flows` | 흐름별 평시 비율(상품 80, 예약 조회 10, 진입 5, 결제 시도 5, 취소 1), 회원 풀, 흐름당 요청 수(계획의 예상 요청 수 계산용. 상품 조회는 `catalog_paths`의 화면 이동 비율로 계산한 값과 맞춘다), 진입 상한(입장 속도 150/초의 80% = 120/초), WAF 예외 없는 시나리오의 IP당 5분 요청 상한(2,400) |
 | `scenarios.<이름>` | 모양(constant, ramping, spike, rush, step), 기본 `peak_rps`(흐름 시작 수), `duration`, `ramp_up`, 상한(`max_rps`, `max_duration`, `max_vus`), WAF 예외 필요 여부, 풀 B 크기(smoke 50, 그 밖 1,000). spike는 몰림(500/초 × 10초), 배경 비율, 관찰 시간(10분). stress는 단계 배수(1·2·4·6·8)와 단계 시간(5분). rush는 spike와 같은 몰림에 결제 비율(50%), 알림 확인 간격(10초)과 대기 상한(8분)(`rush`), 배경은 상품 조회만 |
 | `runner` | 태스크당 초당 요청(처음 1,000), VU당 메모리(5MB), 태스크 크기(4 vCPU, 8GB), 여유 30%, 최대 태스크 수(`max_tasks`, Fargate vCPU 할당량에서 운영 사용분을 뺀 값) |
 | `members` | 시험 회원 ID 범위(시작 번호, 개수), 풀 B 크기(예: 1,000명), 준비 구간 속도(초당 100건 이하), 등록 대기 시간(2분) |
@@ -127,7 +127,7 @@ nova-loadtest/
 - 흐름 하나가 k6 시나리오 하나다. 실행기는 도착률 기반만 쓴다.
 - 모든 요청에 `tags.name`을 경로 템플릿으로 붙인다. `systemTags`는 `status, method, name, scenario, expected_response`다(`url`은 넣지 않는다).
   - 요청은 `lib/http.js`의 함수로만 보낸다. 이 함수는 경로 템플릿과 값을 따로 받아(`req('GET', '/api/v1/products/{id}', {id})`) URL을 만들고, 템플릿을 그대로 `tags.name`에 넣는다. 템플릿이 아래 목록에 없으면 예외를 던진다.
-  - 템플릿 목록(10개, 메서드까지 치면 12가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/categories`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/active`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
+  - 템플릿 목록(14개, 메서드까지 치면 16가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/products/{id}/reviews`, `/api/v1/preorders/products/{id}/shipment-batches`, `/api/v1/categories`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/active`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`, `/api/v1/notifications`, `/api/v1/notifications/unread-count`. 목록을 늘리면 `scenarios.yml`의 `series.names`도 맞춘다. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
   - `ci.yml`의 검사: `lib/http.js` 밖에서 `k6/http`를 바로 부르면 실패한다. k6-safety 작업에서 시험용 응답 서버로 흐름을 돌리고, 나온 `name` 값이 모두 목록 안에 있는지 확인한다.
 - `options.userAgent = 'nova-loadtest/' + TEST_ID`로 둔다. `lib/http.js`의 공통 헤더에 `User-Agent`를 넣지 않는다(넣으면 옵션을 덮는다).
 - `handleSummary`는 JSON 요약 하나만 파일로 쓴다. `setup()`은 토큰이나 헤더 값을 반환하지 않는다(요약에 들어간다).

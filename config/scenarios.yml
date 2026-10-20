@@ -10,8 +10,8 @@ flows:
   catalog:
     weight: 80
     pool: none
-    requests: 3            # 상품 목록, 상품 상세, 카테고리
-    iteration_seconds: 1
+    requests: 7.7          # catalog_paths 로 계산한 평균(설정 검사가 맞춰 본다)
+    iteration_seconds: 2
   preorders:
     weight: 10
     pool: b
@@ -34,6 +34,18 @@ flows:
     requests: 2            # 예약 찾기, 취소
     iteration_seconds: 1
 
+# 상품 조회 흐름의 화면 이동(프론트 fe 의 화면 기준). 비율은 추정이고 RUM(Faro) 실측으로 고친다
+# 홈: 인기 상품(size 10), 카테고리 트리, 대분류 줄마다 목록(기본 size 20)
+# 카테고리 목록과 검색 결과는 size 12, 검색창은 size 8. 정렬(sort)은 화면이 보내지 않아 쓰지 않는다
+# 상품을 누르면 상세와 함께 사전예약은 배송 차수(preorder), 일반 판매는 리뷰(size 100)를 부른다
+catalog_paths:
+  home_rows: 3             # 모바일, PC/주변기기, 웨어러블
+  category: 0.5
+  search: 0.3              # 검색창(size 8) → 검색 결과(size 12)
+  next_page: 0.3
+  max_pages: 3
+  click: 0.7
+
 # 대기열
 admission_rps: 150         # 입장 속도(AdmissionProperties globalCredit)
 entry_cap_rps: 120         # 진입 상한. 입장 속도의 80%
@@ -45,7 +57,7 @@ waf_limit_per_5m: 2400
 scenarios:
   smoke:
     shape: constant
-    peak_rps: 5
+    peak_rps: 2.5          # WAF 예외 없이 2분을 돌 수 있는 크기(상품 조회 흐름 하나가 약 7.7건이라 5 면 넘는다)
     duration: 2m
     max_rps: 20
     max_duration: 10m
@@ -140,7 +152,7 @@ members:
 # 시계열 수 계산(시험 하나, Mimir 한도를 지키려고 2만 개 이하로 둔다)
 series:
   limit: 20000
-  names: 14                # tags.name × method 조합
+  names: 16                # tags.name × method 조합
   statuses_per_name: 3     # 추정
   histogram: 18            # 경계 15 + +Inf 버킷 = 16, 합, 개수
   counters_per_name: 2     # http_reqs, http_req_failed

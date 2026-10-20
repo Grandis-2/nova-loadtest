@@ -127,6 +127,7 @@ case "$mode" in
     expect "올린 요약" "$uploaded" "0 True"
     expect "fake-api 가 센 규칙 위반" "$violations" "{}"
     for r in "GET /api/v1/products" "GET /api/v1/products/{id}" "GET /api/v1/categories" \
+      "GET /api/v1/products/{id}/reviews" "GET /api/v1/preorders/products/{id}/shipment-batches" \
       "POST /api/v1/preorders/queue" "GET /api/v1/preorders/queue" "POST /api/v1/preorders" "GET /api/v1/preorders" \
       "GET /api/v1/preorders/active" "POST /api/v1/preorders/{id}/cancel" "POST /api/v1/orders" "POST /api/v1/orders/{id}/payment-attempts"; do
       n=$(route_count "$r")

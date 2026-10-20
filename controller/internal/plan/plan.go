@@ -122,6 +122,17 @@ type Plan struct {
 	Estimates       Estimates    `json:"estimates"`
 	Warnings        []string     `json:"warnings,omitempty"`
 	Rush            *Rush        `json:"rush,omitempty"`
+	// Catalog는 상품 조회 흐름의 화면 이동 비율이다(scenarios.yml catalog_paths). k6가 PLAN_JSON에서 읽는다
+	Catalog *CatalogPaths `json:"catalog,omitempty"`
+}
+
+type CatalogPaths struct {
+	HomeRows int     `json:"home_rows"`
+	Category float64 `json:"category"`
+	Search   float64 `json:"search"`
+	NextPage float64 `json:"next_page"`
+	MaxPages int     `json:"max_pages"`
+	Click    float64 `json:"click"`
 }
 
 // Rush는 rush 흐름이 접수 뒤에 쓰는 값이다(scenarios.yml rush). k6가 PLAN_JSON에서 읽는다
@@ -303,6 +314,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 	if needPrep {
 		p.PrepProductID = prep
+	}
+	if has("catalog") {
+		c := cfg.CatalogPaths
+		p.Catalog = &CatalogPaths{HomeRows: c.HomeRows, Category: c.Category, Search: c.Search, NextPage: c.NextPage,
+			MaxPages: c.MaxPages, Click: c.Click}
 	}
 	if !openAt.IsZero() {
 		p.OpenAt = openAt.UTC().Format(time.RFC3339)

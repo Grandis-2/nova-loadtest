@@ -291,7 +291,7 @@ func code(c *int32) string {
 func k6Plan(p *plan.Plan) string {
 	b, _ := json.Marshal(map[string]any{
 		"test_id": p.TestID, "flows": p.Flows, "product_id": p.ProductID, "prep_product_id": p.PrepProductID,
-		"abort_error_rate": p.AbortErrorRate, "scenarios": p.Scenarios, "open_at": p.OpenAt, "rush": p.Rush,
+		"abort_error_rate": p.AbortErrorRate, "scenarios": p.Scenarios, "open_at": p.OpenAt, "rush": p.Rush, "catalog": p.Catalog,
 	})
 	return string(b)
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,8 @@ func TestParseRejects(t *testing.T) {
 		{"rush 알림 상한이 관찰 시간보다 길다", "notify_timeout: 8m", "notify_timeout: 15m", "scenarios.rush.rush"},
 		{"rush 배경에 회원 흐름", "    background:            # 준비 구간이 없어 회원이 필요 없는 상품 조회만 둔다\n      catalog: 200",
 			"    background:\n      catalog: 200\n      preorders: 30", "scenarios.rush.background.preorders"},
+		{"상품 조회 요청 수가 화면 이동 비율과 다르다", "requests: 7.7", "requests: 3", "flows.catalog.requests"},
+		{"검색과 카테고리 비율 합이 1보다 크다", "  search: 0.3", "  search: 0.6", "catalog_paths"},
 		{"회원 범위 넘침", "  start: 1 ", "  start: 9223372036854775000 ", "members.start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,5 +61,16 @@ func TestParseRejects(t *testing.T) {
 				t.Fatalf("거절해야 한다(%q): %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// 흐름 하나의 평균 요청: 홈 2 + 대분류 3, 카테고리 0.5 × (1 + 0.3 + 0.09), 검색 0.3 × 2, 상품 누르기 0.7 × 2
+func TestCatalogRequests(t *testing.T) {
+	c, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.CatalogPaths.Requests(); math.Abs(got-7.695) > 1e-9 {
+		t.Fatalf("평균 요청 %.4f(기대 7.695)", got)
 	}
 }

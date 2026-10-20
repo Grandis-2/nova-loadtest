@@ -2,7 +2,7 @@
 // 흐름 하나가 k6 시나리오 하나이고, 실행기는 도착률 기반만 쓴다.
 import { data, req } from './lib/http.js';
 import { PLAN, PREP_PRODUCT_ID, PRODUCT_ID, SUMMARY_PATH, TEST_ID } from './lib/config.js';
-import { catalogFlow } from './lib/flows/catalog.js';
+import { catalogFlow, catalogSetup } from './lib/flows/catalog.js';
 import { cancelFlow } from './lib/flows/cancel.js';
 import { entryFlow, prepareFlow } from './lib/flows/entry_flows.js';
 import { orderFlow } from './lib/flows/order.js';
@@ -51,11 +51,11 @@ function activeOption(productId) {
 export function setup() {
   const flows = new Set(PLAN.flows);
   const list = data(req('GET', '/api/v1/products', { query: { page: 0, size: 100 }, needBody: true }));
-  return {
-    catalogIds: ((list && list.items) || []).map((p) => p.productId),
+  const products = (list && list.items) || [];
+  return Object.assign(flows.has('catalog') ? catalogSetup(products) : {}, {
     optionId: flows.has('entry') ? activeOption(PRODUCT_ID) : null,
     prepOptionId: PLAN.prep_product_id ? activeOption(PREP_PRODUCT_ID) : null,
-  };
+  });
 }
 
 export function catalog(setupData) {

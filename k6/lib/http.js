@@ -11,6 +11,8 @@ import { BASE_URL, LOADTEST_HEADER } from './config.js';
 export const TEMPLATES = Object.freeze([
   '/api/v1/products',
   '/api/v1/products/{id}',
+  '/api/v1/products/{id}/reviews',
+  '/api/v1/preorders/products/{id}/shipment-batches',
   '/api/v1/categories',
   '/api/v1/preorders/queue',
   '/api/v1/preorders',

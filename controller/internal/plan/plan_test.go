@@ -467,6 +467,8 @@ func TestQueue(t *testing.T) {
 		{99980, 165, 606, 672, 9830, 8},
 		// 입장 속도보다 느리면 줄이 없다. 동시 인원은 인원을 넘지 않는다
 		{100, 50, 2, 7, 100, 1},
+		// 도착 시간은 올림한다. 반올림하면 1초에 2,500명(max_rps 2,000 초과)이 들어간다. 실제 진입은 초당 1,250
+		{2500, 2000, 2, 22, 2500, 9},
 	} {
 		in := input("queue")
 		in.Members, in.PeakRPS = tc.members, tc.peak
@@ -518,6 +520,24 @@ func TestQueueRejects(t *testing.T) {
 	p := mustPlan(t, c, with(func(in *Input) { in.Duration = "39s" }))
 	if p.Queue.DeadlineSeconds != 39 || p.Scenarios[0].GracefulStop != "29s" {
 		t.Fatalf("기한 %+v", p.Queue)
+	}
+}
+
+// 실제 진입 수(인원 ÷ 도착 시간)는 입력한 peak_rps를 넘지 않는다
+func TestQueueRateWithinPeak(t *testing.T) {
+	c := cfg(t)
+	for _, peak := range []float64{1, 7, 150, 499, 500, 1999, 2000} {
+		for n := 1; n <= 9000; n += 97 {
+			in := input("queue")
+			in.Members, in.PeakRPS = n, peak
+			p, err := New(c, in)
+			if err != nil {
+				continue // 시간이나 VU 상한으로 거절한 경우
+			}
+			if s := p.Scenarios[0]; float64(n)/float64(p.Queue.ArrivalSeconds) > peak || s.Rate != n {
+				t.Fatalf("%d명, peak_rps %v: %d초에 %d번(초당 %.1f)", n, peak, p.Queue.ArrivalSeconds, s.Rate, float64(n)/float64(p.Queue.ArrivalSeconds))
+			}
+		}
 	}
 }
 

@@ -189,7 +189,7 @@ nova-loadtest/
 - 오류율(중단 기준): `sum(rate(<reqs>{test_id="X",expected_response="false"}[1m])) / sum(rate(<reqs>{test_id="X"}[1m]))`. k6의 `http_req_failed`와 같은 정의다
 - 실제 부하: `sum(rate(<reqs>{test_id="X"}[1m]))`. 계획의 95% 미만이면 "부하 부족"으로 표시한다
 - 밀린 반복: `dropped_iterations`가 0보다 크면 VU가 모자란 것이다
-- queue 처리 인원: `sum by (outcome) (max_over_time(<outcomes>{test_id="X"}[시험 전체]))`에서 `registered` + `accepted` ≥ 인원. `<outcomes>` = `k6_entry_outcome_total`. 누적값의 최댓값을 더하는 까닭은 시계열이 처음 생긴 표본을 `increase`가 세지 않기 때문이다
+- queue 처리 인원: `sum by (outcome) (max_over_time(<outcomes>{test_id="X"}[시험 전체]))`에서 `registered` + `accepted` ≥ 인원. `<outcomes>` = `k6_entry_outcome_total`. 누적값의 최댓값을 더하는 까닭은 시계열이 처음 생긴 표본을 `increase`가 세지 않기 때문이다. `sum(max_over_time(k6_dropped_iterations_total{...}[시험 전체]))`가 0보다 크면 판정 불가다
 - 지표 끊김: `time() - max by (instance) (timestamp(<vus>{test_id="X"}))`가 60을 넘거나, 계획한 태스크 수보다 적게 나오면 끊긴 것이다. 요청 지표는 흐름이 쉬는 구간(등록 대기)에 멈출 수 있어 `vus`를 쓴다
 - 태스크 라벨은 `instance`로 본다. `job`이 `loadtest/k6`로 나온다는 것은 Mimir가 리소스 속성을 OTLP 규칙대로 바꾼다는 뜻이고, 같은 규칙에서 `service.instance.id`는 `instance`가 된다. C-2에서 확인한다
 
@@ -336,7 +336,7 @@ load → spike → stress, soak 순서로 올린다. 매번 담당자 승인을 
 - Mimir에 들어간 k6 지표 이름(단위 접미사)과 시험 하나의 시계열 수
 - `OTEL_RESOURCE_ATTRIBUTES`가 k6 리소스 속성에 실제로 들어가는지. k6 문서는 표준 `OTEL_*` 변수를 쓸 수 있다고만 하고 이 변수를 따로 적지 않았다. 안 들어가면 `options.tags`에 `instance`를 넣고 쿼리의 라벨을 바꾼다
 - k6가 컨트롤러가 넣은 수집 주소와 작업 정의의 고정값(`http/protobuf`, 평문)으로 게이트웨이에 보내는지. k6 로그에 내보내기 오류가 없는지
-- 실제 지표 이름과 라벨: `k6_http_reqs_total`, `k6_http_req_duration_milliseconds_bucket`(`le="500"`의 형식), `k6_vus`, `k6_entry_outcome_total`(라벨 `outcome`), `job="loadtest/k6"`, 태스크 라벨 `instance`. `scenarios.yml`의 지표 이름과 fake-mimir 각본을 이 값으로 맞춘다
+- 실제 지표 이름과 라벨: `k6_http_reqs_total`, `k6_http_req_duration_milliseconds_bucket`(`le="500"`의 형식), `k6_vus`, `k6_entry_outcome_total`(라벨 `outcome`), `k6_dropped_iterations_total`, `job="loadtest/k6"`, 태스크 라벨 `instance`. `scenarios.yml`의 지표 이름과 fake-mimir 각본을 이 값으로 맞춘다
 - `http_req_failed` 같은 Rate 지표가 `condition` 속성으로 나오는지(k6 문서에 형식이 바뀌었다고 되어 있다). 오류율은 `http_reqs`의 `expected_response`로 구하므로 판정에는 영향이 없지만 대시보드 쿼리에 쓴다
 - `k6-runner`가 운영 S3에서 토큰을 받고 `k6-<i>.json`을 올리는지. `StopTask`로 멈췄을 때도 120초 안에 올라가는지
 - CloudFront 로그에 User-Agent `nova-loadtest/<시험 ID>`가 그대로 남는지

@@ -17,7 +17,8 @@ import (
 )
 
 var names = config.Metrics{Job: "loadtest/k6", InstanceLabel: "instance", Duration: "k6_http_req_duration_milliseconds",
-	Reqs: "k6_http_reqs_total", VUs: "k6_vus", LE500: "500", Outcomes: "k6_entry_outcome_total"}
+	Reqs: "k6_http_reqs_total", VUs: "k6_vus", LE500: "500", Outcomes: "k6_entry_outcome_total",
+	Dropped: "k6_dropped_iterations_total"}
 
 func TestHTTPQueryAndRediscover(t *testing.T) {
 	var gotQuery, gotTime string
@@ -79,6 +80,7 @@ func TestQueriesUseConfiguredNames(t *testing.T) {
 	m.Coverage(ctx, now.Add(-5*time.Minute), now)
 	m.Scenarios(ctx, now.Add(-5*time.Minute), now)
 	m.Outcomes(ctx, now.Add(-5*time.Minute), now)
+	m.Dropped(ctx, now.Add(-5*time.Minute), now)
 	for _, q := range rec.queries {
 		if !strings.Contains(q, `test_id="lt-20261020t0630-1"`) || !strings.Contains(q, `job="loadtest/k6"`) {
 			t.Errorf("시험 ID와 job으로 걸러야 한다: %s", q)
@@ -99,6 +101,9 @@ func TestQueriesUseConfiguredNames(t *testing.T) {
 	// 시계열이 처음 생긴 표본까지 세려고 increase 대신 누적값의 최댓값을 더한다
 	if !strings.Contains(rec.queries[5], "sum by (outcome) (max_over_time(k6_entry_outcome_total{") || !strings.Contains(rec.queries[5], "[300s]") {
 		t.Errorf("queue 의 처리 인원은 진입 결과별 누적값으로 센다: %s", rec.queries[5])
+	}
+	if !strings.Contains(rec.queries[6], "sum(max_over_time(k6_dropped_iterations_total{") || !strings.Contains(rec.queries[6], "[300s]") {
+		t.Errorf("시작하지 못한 반복은 누적값으로 센다: %s", rec.queries[6])
 	}
 }
 

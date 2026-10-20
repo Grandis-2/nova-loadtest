@@ -76,6 +76,7 @@ type fakeMetrics struct {
 	outcomes    func() map[string]float64
 	members     int
 	outcomesEnd time.Time // Outcomes 를 조회한 구간의 끝
+	dropped     float64
 	queried     bool
 }
 
@@ -141,6 +142,10 @@ func (m *fakeMetrics) Outcomes(_ context.Context, _, end time.Time) (map[string]
 	return map[string]float64{"registered": float64(m.members)}, nil
 }
 
+func (m *fakeMetrics) Dropped(context.Context, time.Time, time.Time) (float64, error) {
+	return m.dropped, nil
+}
+
 // allScenarios 는 계획이 만드는 k6 시나리오가 모두 요청을 보낸 구간 값이다
 func allScenarios() map[string]float64 {
 	out := map[string]float64{}
@@ -173,11 +178,6 @@ type fixture struct {
 // newFixture 는 다섯 흐름 smoke(2분)를 준비한다. k6 는 끝 시각에 0 으로 끝나는 것이 기본이다
 func newFixture(t *testing.T, scenario string, k6 func(env map[string]string, n int, end time.Time) fakeecs.Behavior) *fixture {
 	t.Helper()
-	cfg, err := config.Default()
-	if err != nil {
-		t.Fatal(err)
-	}
-	clk := clock.NewFake(t0)
 	in := plan.Input{TestID: testID, Scenario: scenario, ProductID: product, Now: t0}
 	if scenario == "smoke" {
 		in.Duration = "2m"
@@ -185,6 +185,17 @@ func newFixture(t *testing.T, scenario string, k6 func(env map[string]string, n 
 	if scenario == "rush" {
 		in.OpenAt = t0.Add(20 * time.Minute).Format(time.RFC3339)
 	}
+	return newFixtureIn(t, in, k6)
+}
+
+// newFixtureIn 은 입력 in 으로 준비한다
+func newFixtureIn(t *testing.T, in plan.Input, k6 func(env map[string]string, n int, end time.Time) fakeecs.Behavior) *fixture {
+	t.Helper()
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewFake(t0)
 	p, err := plan.New(cfg, in)
 	if err != nil {
 		t.Fatal(err)
@@ -727,7 +738,7 @@ func TestQueueNotAllProcessed(t *testing.T) {
 	expect(t, s, report.Fail, "기준을 넘었다")
 	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
 	if c.Pass || c.Note != "5000명 중 4990명 처리(registered 4900, accepted 90), 실패 accept_failed 1, poll_limit 4, "+
-		"결과 없음 5(시작하지 못했거나 처리 기한에 끊겼다)" {
+		"결과 없음 5(시작하지 못함 0, 나머지는 처리 기한에 끊겼다)" {
 		t.Fatalf("모자란 인원과 실패를 보여야 한다: %+v", c)
 	}
 }
@@ -739,4 +750,53 @@ func TestQueueEarlyFailureAborts(t *testing.T) {
 		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(90 * time.Second), ExitCode: 1, StopExitCode: 105, ImageDigest: "sha256:aaa"}
 	})
 	expect(t, f.execute(t), report.Aborted, "일찍 끝났다")
+}
+
+// 판정 구간(약 11분)보다 훨씬 일찍 0으로 끝난 태스크는 멈춘 때까지만 지표를 요구한다(PR #16 리뷰).
+// 0이 아닌 코드로 끝났거나 계속 돈 태스크는 구간 전체를 요구한다
+func TestQueueTaskFinishesFarEarly(t *testing.T) {
+	in := plan.Input{TestID: testID, Scenario: "queue", ProductID: product, Members: 99980, PeakRPS: 165, Now: t0}
+	var startAt time.Time
+	f := newFixtureIn(t, in, func(env map[string]string, n int, _ time.Time) fakeecs.Behavior {
+		startAt, _ = time.Parse(time.RFC3339, env["START_AT"])
+		exit := startAt.Add(700 * time.Second)
+		if n == 0 {
+			exit = startAt.Add(100 * time.Second)
+		}
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: exit, ExitCode: 0, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	if w := f.plan.Windows[0]; w.End-w.Start < 600 {
+		t.Fatalf("판정 구간이 길어야 이 경우를 본다: %+v", w)
+	}
+	f.metrics.seen = func(at time.Time) (map[string]float64, error) {
+		out := map[string]float64{}
+		for i := range f.plan.Tasks {
+			out[fmt.Sprint(i)] = 5
+		}
+		out["0"] = at.Sub(startAt.Add(100 * time.Second)).Seconds()
+		return out, nil
+	}
+	// 태스크 0 은 100초까지만 표본이 있다
+	f.metrics.cov = func(start, end time.Time) map[string]float64 {
+		out := map[string]float64{}
+		for i := range f.plan.Tasks {
+			out[fmt.Sprint(i)] = end.Sub(start).Seconds() / 10
+		}
+		out["0"] = startAt.Add(100*time.Second).Sub(start).Seconds() / 10
+		return out
+	}
+	expect(t, f.execute(t), report.Pass, "")
+}
+
+// k6 가 VU 부족으로 회원을 들여보내지 못했으면 뒷단의 불합격이 아니라 판정 불가다(PR #16 리뷰)
+func TestQueueDroppedIsInconclusive(t *testing.T) {
+	f := newFixture(t, "queue", nil)
+	f.metrics.dropped = 30
+	f.metrics.outcomes = func() map[string]float64 { return map[string]float64{"registered": 4970} }
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "30명이 진입을 시작하지 못했다")
+	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
+	if c.Pass || !strings.Contains(c.Note, "결과 없음 30(시작하지 못함 30") {
+		t.Fatalf("구간 값과 처리 인원은 남긴다: %+v", c)
+	}
 }

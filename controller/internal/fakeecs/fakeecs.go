@@ -140,9 +140,17 @@ func (f *Fake) DescribeTasks(_ context.Context, in *ecs.DescribeTasksInput, _ ..
 			}
 			st, code := t.status(now)
 			started := t.created.Add(t.b.RunningAfter)
+			var stopped *time.Time
+			if st == "STOPPED" {
+				at := t.b.ExitAt
+				if t.stoppedAt != nil && (at.IsZero() || t.stoppedAt.Before(at)) {
+					at = *t.stoppedAt
+				}
+				stopped = &at
+			}
 			out.Tasks = append(out.Tasks, types.Task{
 				TaskArn: aws.String(arn), LastStatus: aws.String(st), StartedBy: aws.String(t.startedBy),
-				TaskDefinitionArn: aws.String(t.family), StartedAt: &started, StoppedReason: aws.String(t.stopReason),
+				TaskDefinitionArn: aws.String(t.family), StartedAt: &started, StoppedAt: stopped, StoppedReason: aws.String(t.stopReason),
 				Containers: []types.Container{{Name: aws.String(t.container), ExitCode: code, ImageDigest: aws.String(t.b.ImageDigest)}},
 			})
 			continue

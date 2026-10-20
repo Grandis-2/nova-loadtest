@@ -173,6 +173,7 @@ type Metrics struct {
 	Reqs          string `yaml:"reqs"`
 	VUs           string `yaml:"vus"`
 	Outcomes      string `yaml:"outcomes"`
+	Dropped       string `yaml:"dropped"`
 	LE500         string `yaml:"le_500"`
 }
 
@@ -376,7 +377,8 @@ func (c *Config) Validate() error {
 		bad("slo 값을 확인한다")
 	}
 	// 이름이 비면 쿼리가 시험의 모든 시계열에 걸린다
-	if mt := c.Metrics; mt.Job == "" || mt.InstanceLabel == "" || mt.Duration == "" || mt.Reqs == "" || mt.VUs == "" || mt.LE500 == "" || mt.Outcomes == "" {
+	if mt := c.Metrics; mt.Job == "" || mt.InstanceLabel == "" || mt.Duration == "" || mt.Reqs == "" || mt.VUs == "" || mt.LE500 == "" || mt.Outcomes == "" ||
+		mt.Dropped == "" {
 		bad("metrics의 이름은 비어 있을 수 없다")
 	}
 	return errors.Join(errs...)

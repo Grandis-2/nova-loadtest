@@ -47,6 +47,7 @@ type Metrics interface {
 	Window(ctx context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error)
 	Scenarios(ctx context.Context, start, end time.Time) (map[string]float64, error)
 	Outcomes(ctx context.Context, start, end time.Time) (map[string]float64, error)
+	Dropped(ctx context.Context, start, end time.Time) (float64, error)
 }
 
 // 감시 규칙
@@ -162,7 +163,7 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	case report.Aborted:
 		// stress 는 중단 기준에 걸려 멈추는 것도 정상 결과다. 멈추기 전에 끝난 단계까지 판정한다
 		if p.Scenario == "stress" && outcome.byCriteria {
-			ws, why := judge(ctx, d, r.Config, p, startAt, outcome.at)
+			ws, why := judge(ctx, d, r.Config, p, startAt, outcome.at, nil)
 			if why != "" {
 				return finish(report.Inconclusive, why)
 			}
@@ -173,7 +174,7 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	}
 	// 끝까지 돌았으면(끝 시각 30초 전 안에 끝난 것 포함) 계획한 구간을 모두 판정한다. 빠진 지표는 구간 누락으로 걸린다
 	plannedEnd := startAt.Add(time.Duration(p.MainEnd) * time.Second)
-	ws, why := judge(ctx, d, r.Config, p, startAt, latest(outcome.at, plannedEnd))
+	ws, why := judge(ctx, d, r.Config, p, startAt, latest(outcome.at, plannedEnd), finishedEarly(ctx, d, r, p, arns))
 	if why != "" {
 		return finish(report.Inconclusive, why)
 	}
@@ -181,13 +182,19 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 		return finish(report.Inconclusive, fmt.Sprintf("판정 구간 %d개 중 %d개만 판정했다", len(p.Windows), len(ws)))
 	}
 	if p.Queue != nil {
-		c, why := processed(ctx, d, p, startAt)
+		c, dropped, why := processed(ctx, d, p, startAt)
 		if why != "" {
 			return finish(report.Inconclusive, why)
 		}
 		w := &ws[len(ws)-1]
 		w.ByName = append(w.ByName, c)
 		w.Pass = w.Pass && c.Pass
+		if dropped > 0 {
+			// 계획한 인원을 k6 가 보내지 못했다. 뒷단이 처리하지 못한 것과 구별해 판정하지 않는다(구간 값은 남긴다)
+			s.Windows = ws
+			return finish(report.Inconclusive, fmt.Sprintf("k6 VU 가 모자라 %.0f명이 진입을 시작하지 못했다(dropped_iterations). "+
+				"계획한 인원을 보내지 못해 판정하지 않는다. peak_rps 를 낮춰 다시 돌린다", dropped))
+		}
 	}
 	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
 	return finish(judgment(p, ws))
@@ -195,9 +202,10 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 
 // processed 는 queue 에서 입력한 인원이 모두 접수까지 갔는지 본다. 등록 확인에서 REGISTERED 를 본 회원(registered)과
 // 접수만 확인한 회원(accepted)을 처리로 센다. 처리 기한에 끊긴 회원은 결과를 남기지 않아 모자란 수로 드러난다
-func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (report.Check, string) {
+// 돌려주는 dropped 는 VU 가 모자라 시작하지 못한 반복 수다
+func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (report.Check, float64, string) {
 	if err := d.Clock.Sleep(ctx, ingestDelay); err != nil {
-		return report.Check{}, err.Error()
+		return report.Check{}, 0, err.Error()
 	}
 	end := startAt.Add(time.Duration(p.Estimates.TotalSeconds)*time.Second + stopTimeout)
 	if now := d.Clock.Now(); now.Before(end) {
@@ -205,7 +213,11 @@ func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (re
 	}
 	by, err := d.Metrics.Outcomes(ctx, startAt, end)
 	if err != nil {
-		return report.Check{}, "진입 결과를 조회하지 못했다: " + err.Error()
+		return report.Check{}, 0, "진입 결과를 조회하지 못했다: " + err.Error()
+	}
+	dropped, err := d.Metrics.Dropped(ctx, startAt, end)
+	if err != nil {
+		return report.Check{}, 0, "시작하지 못한 반복을 조회하지 못했다: " + err.Error()
 	}
 	n := by["registered"] + by["accepted"]
 	c := report.Check{Name: "queue:processed", Requests: n, Pass: n >= float64(p.Queue.Members)}
@@ -224,10 +236,10 @@ func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (re
 		all += v
 	}
 	if miss := float64(p.Queue.Members) - all; miss > 0 {
-		// 결과를 남기지 않은 회원: VU 가 모자라 시작하지 못했거나(k6 dropped_iterations) 처리 기한에 끊겼다
-		c.Note += fmt.Sprintf(", 결과 없음 %.0f(시작하지 못했거나 처리 기한에 끊겼다)", miss)
+		// 결과를 남기지 않은 회원: VU 가 모자라 시작하지 못했거나(dropped_iterations) 처리 기한에 끊겼다
+		c.Note += fmt.Sprintf(", 결과 없음 %.0f(시작하지 못함 %.0f, 나머지는 처리 기한에 끊겼다)", miss, dropped)
 	}
-	return c, ""
+	return c, dropped, ""
 }
 
 func latest(a, b time.Time) time.Time {
@@ -569,9 +581,29 @@ func pct(v float64) string {
 	return fmt.Sprintf("%.2f%%", v*100)
 }
 
+// finishedEarly 는 queue 에서 맡은 회원을 모두 처리하고 0으로 끝난 태스크의 멈춘 시각이다. 그 뒤로는 지표가 없다.
+// queue 가 아니면 nil 이다
+func finishedEarly(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string) map[int]time.Time {
+	if p.Queue == nil {
+		return nil
+	}
+	states, err := d.Runner.Describe(context.WithoutCancel(ctx), arns, r.RunTask.Tasks["k6"].Container)
+	if err != nil {
+		return nil // 모르면 구간 전체를 요구한다(판정 불가 쪽으로 기운다)
+	}
+	out := map[int]time.Time{}
+	for i, s := range states {
+		if s.LastStatus == "STOPPED" && s.ExitCode != nil && *s.ExitCode == 0 && s.StoppedAt != nil {
+			out[i] = *s.StoppedAt
+		}
+	}
+	return out
+}
+
 // judge는 끝난 판정 구간을 모두 판정한다. 구간에 지표가 빠진 태스크가 있으면 판정 불가다.
+// stopped 는 일찍 정상 종료한 태스크의 멈춘 시각이고(queue), 그 태스크는 멈춘 때까지만 지표를 요구한다.
 // 돌려주는 reason 은 판정 불가일 때의 까닭이다.
-func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startAt, endedAt time.Time) ([]report.Window, string) {
+func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startAt, endedAt time.Time, stopped map[int]time.Time) ([]report.Window, string) {
 	var out []report.Window
 	for _, w := range p.Windows {
 		start := startAt.Add(time.Duration(w.Start) * time.Second)
@@ -583,8 +615,12 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		if err != nil {
 			return nil, "구간 " + w.Name + "의 지표를 조회하지 못했다: " + err.Error()
 		}
-		want := float64(w.End-w.Start)/exportEvery - coverageSlack
 		for i := range p.Tasks {
+			to := end
+			if at, ok := stopped[i]; ok && at.Before(end) {
+				to = at
+			}
+			want := to.Sub(start).Seconds()/exportEvery - coverageSlack
 			if got := cov[strconv.Itoa(i)]; got < want {
 				return nil, fmt.Sprintf("구간 %s에서 k6 태스크 %d의 지표가 빠졌다(표본 %.0f개, 기대 %.0f개 이상)", w.Name, i, got, want)
 			}

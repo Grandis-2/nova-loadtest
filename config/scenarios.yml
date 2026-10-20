@@ -199,4 +199,5 @@ metrics:
   reqs: k6_http_reqs_total
   vus: k6_vus
   outcomes: k6_entry_outcome_total   # 진입 흐름의 결과(entry.js entry_outcome, 라벨 outcome)
+  dropped: k6_dropped_iterations_total  # VU 가 모자라 시작하지 못한 반복(k6 기본 지표)
   le_500: "500"

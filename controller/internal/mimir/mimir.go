@@ -186,6 +186,16 @@ func (m Metrics) Outcomes(ctx context.Context, start, end time.Time) (map[string
 	return m.byLabel(ctx, q, end, "outcome")
 }
 
+// Dropped는 구간 [start, end]에 VU 가 모자라 시작하지 못한 반복 수다. 없었으면 시계열이 없어 0이다
+func (m Metrics) Dropped(ctx context.Context, start, end time.Time) (float64, error) {
+	q := fmt.Sprintf(`sum(max_over_time(%s{%s}[%s]))`, m.Names.Dropped, m.sel(""), rng(end.Sub(start)))
+	v, err := m.scalar(ctx, q, end)
+	if math.IsNaN(v) {
+		v = 0
+	}
+	return v, err
+}
+
 func (m Metrics) byLabel(ctx context.Context, q string, at time.Time, label string) (map[string]float64, error) {
 	out, err := m.Q.Query(ctx, q, at)
 	if err != nil {

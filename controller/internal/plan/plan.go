@@ -610,8 +610,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		mainLen = 1 + deadline // 진입은 본 시험 시작(open_at) + 1초에 시작한다(spike, rush와 같다. 시계 어긋남)
 		p.Queue = &Queue{Members: members, ArrivalSeconds: arrivalS, MinSeconds: minS, DeadlineSeconds: deadline}
 		if math.Ceil(inFlight) > float64(sc.MaxVUs) {
-			// 줄 (r-A)·n/r 과 입장 뒤 A·iter 의 합이 상한 안인 r 은 A·n/(n-room) 이하다. 도착 시간을 반올림하면 실제
-			// 진입 수가 조금 커지므로, 그 값에서 낮춰 가며 계획과 같은 계산으로 상한 안에 드는 가장 큰 값을 찾는다
+			// 줄 (r-A)·n/r 과 입장 뒤 A·iter 의 합이 상한 안인 r 은 A·n/(n-room) 이하다. 도착 시간을 올림하므로 실제
+			// 진입 수는 이 값 이하라 보통 바로 맞는다. 부동소수 오차에 대비해 계획과 같은 계산으로 확인하며 낮춘다
 			if room := float64(sc.MaxVUs) - cfg.AdmissionRPS*e.IterationSeconds; room > 0 && n > room {
 				for r := math.Floor(cfg.AdmissionRPS * n / (n - room)); r >= 1; r-- {
 					if _, _, _, f := queueLoad(cfg, n, r); math.Ceil(f) <= float64(sc.MaxVUs) {
@@ -818,9 +818,10 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 
 // queueLoad 는 queue 에서 인원 n명을 초당 peak로 들여보낼 때의 도착 시간, 실제 진입 수, 진입이 끝날 때 줄에 선 회원,
 // 동시 인원(줄 + 입장 뒤 접수와 등록 확인 중인 회원)이다. 회원 한 명이 VU 하나를 잡는다.
-// 도착률을 "arrivalS초에 n번"으로 적어 k6 의 반복 수가 인원과 같다
+// 도착률을 "arrivalS초에 n번"으로 적어 k6 의 반복 수가 인원과 같다. 도착 시간은 올림해서 실제 진입 수가 peak 를
+// 넘지 않게 한다(반올림하면 2,500명을 초당 2,000으로 넣을 때 1초에 2,500명이 들어가 max_rps 도 넘었다)
 func queueLoad(cfg *config.Config, n, peak float64) (arrivalS int, rate, waiting, inFlight float64) {
-	arrivalS = max(1, int(math.Round(n/peak)))
+	arrivalS = max(1, int(math.Ceil(n/peak)))
 	rate = n / float64(arrivalS)
 	waiting = math.Max(0, (rate-cfg.AdmissionRPS)*float64(arrivalS))
 	inFlight = math.Min(n, waiting+math.Min(rate, cfg.AdmissionRPS)*cfg.Flows["entry"].IterationSeconds)

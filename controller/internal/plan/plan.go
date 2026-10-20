@@ -38,6 +38,7 @@ type Input struct {
 	Runners        int       `json:"runners,omitempty"`
 	AbortErrorRate float64   `json:"abort_error_rate,omitempty"`
 	Flows          []string  `json:"flows,omitempty"`     // 비면 다섯 흐름 모두
+	Members        int       `json:"members,omitempty"`   // queue: 진입하는 인원
 	Now            time.Time `json:"planned_at,omitzero"` // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
 }
 
@@ -126,6 +127,7 @@ type Plan struct {
 	Estimates       Estimates    `json:"estimates"`
 	Warnings        []string     `json:"warnings,omitempty"`
 	Rush            *Rush        `json:"rush,omitempty"`
+	Queue           *Queue       `json:"queue,omitempty"`
 	// Catalog는 상품 조회 흐름의 화면 이동 비율이다(scenarios.yml catalog_paths). k6가 PLAN_JSON에서 읽는다
 	Catalog *CatalogPaths `json:"catalog,omitempty"`
 }
@@ -145,6 +147,14 @@ type Rush struct {
 	PayRatio              float64 `json:"pay_ratio"`
 	NotifyIntervalSeconds int     `json:"notify_interval_seconds"`
 	NotifyTimeoutSeconds  int     `json:"notify_timeout_seconds"`
+}
+
+// Queue는 queue 시나리오의 인원과 시간이다. 초는 진입 시작(본 시험 시작 + 1초) 기준이다. 컨트롤러가 모두 처리되었는지 볼 때 쓴다
+type Queue struct {
+	Members         int `json:"members"`
+	ArrivalSeconds  int `json:"arrival_seconds"`  // 모두 진입하는 시간
+	MinSeconds      int `json:"min_seconds"`      // 입장 속도로 모두 들여보내고 접수까지 가는 최소 시간
+	DeadlineSeconds int `json:"deadline_seconds"` // 처리 기한(duration). k6는 이때 남은 회원을 끊는다
 }
 
 // rushPayRequests는 rush에서 결제하는 회원이 알림을 받은 뒤 보내는 요청이다(알림 목록, 예약 상세, 주문, 결제 시도).
@@ -183,9 +193,16 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 
 	// 흐름. rush는 흐름이 정해져 있다. 몰린 회원 한 명이 진입부터 결제 시도까지 가므로 진입과 주문을 같이 센다
 	rush := sc.Shape == config.ShapeRush
+	queue := sc.Shape == config.ShapeQueue
 	flows := in.Flows
 	if len(flows) == 0 {
 		flows = config.FlowOrder
+	}
+	if queue {
+		if len(in.Flows) > 0 {
+			fail("queue에는 flows를 쓰지 않는다(진입 흐름만 돈다)")
+		}
+		flows = []string{"entry"}
 	}
 	if rush {
 		if len(in.Flows) > 0 {
@@ -214,7 +231,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	has := func(f string) bool { return slices.Contains(flows, f) }
 	usesPool := func(p config.Pool) bool {
 		// rush의 주문은 몰린 회원(풀 A)이 한다
-		if rush && p != config.PoolA {
+		if (rush || queue) && p != config.PoolA {
 			return false
 		}
 		for _, f := range flows {
@@ -255,6 +272,18 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if in.RampUp != "" && sc.Shape != config.ShapeRamping {
 		fail("%s에는 ramp_up을 쓰지 않는다(올리는 구간이 있는 시나리오는 load뿐이다)", in.Scenario)
 	}
+	members := in.Members
+	if in.Members != 0 && !queue {
+		fail("%s에는 members를 쓰지 않는다(인원을 정하는 시나리오는 queue뿐이다)", in.Scenario)
+	}
+	if queue {
+		if members == 0 {
+			members = sc.Members
+		}
+		if members < 1 || members > sc.MaxMembers {
+			fail("members %d는 1 이상 %d 이하여야 한다", members, sc.MaxMembers)
+		}
+	}
 
 	// 상품
 	prep := in.PrepProductID
@@ -274,13 +303,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		fail("조회, 결제, 취소 흐름에는 prep_product_id(또는 product_id)가 필요하다")
 	}
 
-	if rush {
-		if in.OpenAt == "" {
-			fail("rush에는 open_at이 필요하다")
-		}
-		if in.PrepProductID != "" {
-			fail("rush에는 prep_product_id를 쓰지 않는다(준비 구간이 없다)")
-		}
+	if rush && in.OpenAt == "" {
+		fail("rush에는 open_at이 필요하다")
+	}
+	if (rush || queue) && in.PrepProductID != "" {
+		fail("%s에는 prep_product_id를 쓰지 않는다(준비 구간이 없다)", in.Scenario)
 	}
 
 	// spike
@@ -362,6 +389,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	var scenarios []K6Scenario
 	var mainLen int // 본 시험 길이(초)
 	var entryTotal, cancelTotal float64
+	var vuHint string // VU 상한을 넘을 때 덧붙이는 안내
 
 	addConstant := func(name, flow string, rps float64, start, length int, vus float64) {
 		if rps <= 0 || length <= 0 {
@@ -562,6 +590,51 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			addConstant("rush", "rush", peak, ms+1, burstS, peak*float64(burstS))
 			windows = append(windows, Window{"rush", ms, ms + mainLen})
 		}
+
+	case config.ShapeQueue:
+		p.Multiplier = 1
+		e := cfg.Flows["entry"]
+		n := float64(members)
+		arrivalS, rate, waiting, inFlight := queueLoad(cfg, n, peak)
+		admitted := math.Min(rate, cfg.AdmissionRPS)
+		minS := int(math.Ceil(n/admitted + e.IterationSeconds))
+		deadline := minS + int(sc.DeadlineMargin.D().Seconds())
+		if in.Duration != "" {
+			deadline = int(dur.Seconds())
+			if deadline < minS {
+				fail("queue의 duration %s는 최소 처리 시간 %s 이상이어야 한다(%d명을 입장 속도 %.0f/초로 들여보내고 접수까지)",
+					dur, hms(minS), members, admitted)
+			}
+		}
+		dur = time.Duration(deadline) * time.Second
+		mainLen = 1 + deadline // 진입은 본 시험 시작(open_at) + 1초에 시작한다(spike, rush와 같다. 시계 어긋남)
+		p.Queue = &Queue{Members: members, ArrivalSeconds: arrivalS, MinSeconds: minS, DeadlineSeconds: deadline}
+		if math.Ceil(inFlight) > float64(sc.MaxVUs) {
+			// 줄 (r-A)·n/r 과 입장 뒤 A·iter 의 합이 상한 안인 r 은 A·n/(n-room) 이하다. 도착 시간을 반올림하면 실제
+			// 진입 수가 조금 커지므로, 그 값에서 낮춰 가며 계획과 같은 계산으로 상한 안에 드는 가장 큰 값을 찾는다
+			if room := float64(sc.MaxVUs) - cfg.AdmissionRPS*e.IterationSeconds; room > 0 && n > room {
+				for r := math.Floor(cfg.AdmissionRPS * n / (n - room)); r >= 1; r-- {
+					if _, _, _, f := queueLoad(cfg, n, r); math.Ceil(f) <= float64(sc.MaxVUs) {
+						vuHint = fmt.Sprintf(". %d명이면 peak_rps를 %.0f 이하로 둔다", members, r)
+						break
+					}
+				}
+			}
+		}
+		ph := phase{rates: map[string]float64{"entry": rate}, extraQ: waiting / cfg.PollIntervalSeconds}
+		ph.extraW = (admitted - rate) * e.AdmittedRequests
+		phases = append(phases, ph)
+		entryTotal = n
+		build = func(ms int) {
+			scenarios = append(scenarios, K6Scenario{
+				Name: "queue", Flow: "entry", Executor: "constant-arrival-rate",
+				StartTime: secs(ms + 1), TimeUnit: secs(arrivalS), Rate: members, Duration: secs(arrivalS),
+				// 줄에 선 회원은 처리 기한까지 기다린다
+				GracefulStop: secs(deadline - arrivalS),
+			})
+			setVUs(&scenarios[len(scenarios)-1], inFlight, 1)
+			windows = append(windows, Window{"queue", ms, ms + 1 + minS})
+		}
 	}
 
 	// 풀 A(spike는 위에서 시나리오마다 더했다)와 풀 C에도 여유를 둔다
@@ -594,6 +667,9 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	for i := range p.Scenarios {
 		switch p.Scenarios[i].Flow {
 		case "entry", "prepare":
+			if queue {
+				continue // 처리 기한으로 위에서 정했다
+			}
 			p.Scenarios[i].GracefulStop = secs(graceful)
 		case "rush":
 			// 몰림 10초 뒤에도 줄, 등록 알림, 결제가 관찰 시간 동안 이어진다
@@ -601,7 +677,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		}
 	}
 	total := p.MainEnd
-	if has("entry") || prepS > 0 {
+	// queue는 본 시험 끝이 처리 기한이다
+	if (has("entry") || prepS > 0) && !queue {
 		total += graceful
 	}
 
@@ -657,7 +734,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	p.Tasks = tasks
 
 	if vus > sc.MaxVUs {
-		fail("최대 VU %d가 %s 상한 %d를 넘는다", vus, in.Scenario, sc.MaxVUs)
+		fail("최대 VU %d가 %s 상한 %d를 넘는다%s", vus, in.Scenario, sc.MaxVUs, vuHint)
 	}
 
 	// WAF 예외 없이 도는 시나리오: 태스크(IP) 하나가 5분 동안 보내는 요청
@@ -737,6 +814,17 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		return nil, errors.New(strings.Join(errs, "\n"))
 	}
 	return p, nil
+}
+
+// queueLoad 는 queue 에서 인원 n명을 초당 peak로 들여보낼 때의 도착 시간, 실제 진입 수, 진입이 끝날 때 줄에 선 회원,
+// 동시 인원(줄 + 입장 뒤 접수와 등록 확인 중인 회원)이다. 회원 한 명이 VU 하나를 잡는다.
+// 도착률을 "arrivalS초에 n번"으로 적어 k6 의 반복 수가 인원과 같다
+func queueLoad(cfg *config.Config, n, peak float64) (arrivalS int, rate, waiting, inFlight float64) {
+	arrivalS = max(1, int(math.Round(n/peak)))
+	rate = n / float64(arrivalS)
+	waiting = math.Max(0, (rate-cfg.AdmissionRPS)*float64(arrivalS))
+	inFlight = math.Min(n, waiting+math.Min(rate, cfg.AdmissionRPS)*cfg.Flows["entry"].IterationSeconds)
+	return
 }
 
 func durationOr(s string, def time.Duration) (time.Duration, error) {

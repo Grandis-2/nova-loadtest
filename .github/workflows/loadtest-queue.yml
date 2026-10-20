@@ -1,0 +1,51 @@
+name: loadtest queue
+
+# 입력한 인원이 한 번씩 진입해 Retry-After 간격으로 기다리고, 입장하면 접수까지 간다. 모두 처리되었는지 본다.
+# 흐름이 정해져 있고(진입만) 준비 구간과 배경 트래픽이 없다.
+# 공통 실행은 _loadtest.yml 이다. 시나리오 설명은 위키 "시나리오-queue"에 있다.
+on:
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: 진입할 시험 상품 ID
+        required: true
+      members:
+        description: 진입하는 인원(최대 99980). 비우면 기본 5000
+      peak_rps:
+        description: 초당 진입 수. 줄에 선 회원과 접수 중인 회원이 1만 명을 넘으면 계획이 줄일 값을 알려 준다. 비우면 기본 500
+      duration:
+        description: 처리 기한(예 15m). 입장 속도로 모두 접수하는 최소 시간 이상이어야 한다. 비우면 최소 시간 + 3m
+      open_at:
+        description: 본 시험을 이 시각에 시작한다(RFC3339, 지금부터 1시간 안). 비우면 바로 시작
+      runners:
+        description: k6 태스크 대수. 비우면 계산한 값
+      abort_error_rate:
+        description: 중단할 오류율(%, 0보다 크고 50 이하. 5 는 5%). 비우면 기본 5
+
+# 모든 시나리오가 같은 그룹을 쓴다. 같은 시간에는 시험을 하나만 돌리고, 진행 중인 시험은 취소하지 않는다.
+# 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라 시험 중에 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook).
+concurrency:
+  group: loadtest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  loadtest:
+    # 공통 실행의 작업이 OIDC 로 역할을 맡는다. 부르는 쪽이 준 권한보다 넓힐 수 없다
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_loadtest.yml
+    # 빌드 역할 ARN 은 저장소 비밀이다. 실행 역할 ARN 과 Slack 주소는 공통 실행의 run 작업이 environment loadtest 에서 읽는다
+    secrets: inherit
+    with:
+      scenario: queue
+      product_id: ${{ inputs.product_id }}
+      members: ${{ inputs.members }}
+      peak_rps: ${{ inputs.peak_rps }}
+      duration: ${{ inputs.duration }}
+      open_at: ${{ inputs.open_at }}
+      runners: ${{ inputs.runners }}
+      abort_error_rate: ${{ inputs.abort_error_rate }}

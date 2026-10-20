@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +46,7 @@ type Metrics interface {
 	Coverage(ctx context.Context, start, end time.Time) (map[string]float64, error)
 	Window(ctx context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error)
 	Scenarios(ctx context.Context, start, end time.Time) (map[string]float64, error)
+	Outcomes(ctx context.Context, start, end time.Time) (map[string]float64, error)
 }
 
 // 감시 규칙
@@ -57,6 +60,9 @@ const (
 	minLeadTime   = time.Minute // START_AT 이 지금부터 이보다 가까우면 태스크가 제때 뜨지 못한다
 	exportEvery   = 10          // k6 OTel 내보내기 간격(초). 구간 누락 판단에 쓴다
 	coverageSlack = 5           // 빠져도 되는 표본 수(약 50초. 1분 넘게 비면 판정 불가)
+	// k6 가 끝날 때 내보낸 마지막 지표가 수집 게이트웨이와 수집기(각각 1~2초 배치)를 지나 Mimir 에 들어올 시간.
+	// queue 의 처리 인원은 끝난 바로 뒤에 세므로 이만큼 기다린다
+	ingestDelay = 30 * time.Second
 )
 
 // Deps는 컨트롤러가 쓰는 외부 시스템이다. 테스트는 가짜로 바꾼다.
@@ -174,8 +180,54 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	if len(ws) != len(p.Windows) {
 		return finish(report.Inconclusive, fmt.Sprintf("판정 구간 %d개 중 %d개만 판정했다", len(p.Windows), len(ws)))
 	}
+	if p.Queue != nil {
+		c, why := processed(ctx, d, p, startAt)
+		if why != "" {
+			return finish(report.Inconclusive, why)
+		}
+		w := &ws[len(ws)-1]
+		w.ByName = append(w.ByName, c)
+		w.Pass = w.Pass && c.Pass
+	}
 	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
 	return finish(judgment(p, ws))
+}
+
+// processed 는 queue 에서 입력한 인원이 모두 접수까지 갔는지 본다. 등록 확인에서 REGISTERED 를 본 회원(registered)과
+// 접수만 확인한 회원(accepted)을 처리로 센다. 처리 기한에 끊긴 회원은 결과를 남기지 않아 모자란 수로 드러난다
+func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (report.Check, string) {
+	if err := d.Clock.Sleep(ctx, ingestDelay); err != nil {
+		return report.Check{}, err.Error()
+	}
+	end := startAt.Add(time.Duration(p.Estimates.TotalSeconds)*time.Second + stopTimeout)
+	if now := d.Clock.Now(); now.Before(end) {
+		end = now
+	}
+	by, err := d.Metrics.Outcomes(ctx, startAt, end)
+	if err != nil {
+		return report.Check{}, "진입 결과를 조회하지 못했다: " + err.Error()
+	}
+	n := by["registered"] + by["accepted"]
+	c := report.Check{Name: "queue:processed", Requests: n, Pass: n >= float64(p.Queue.Members)}
+	var rest []string
+	for _, k := range slices.Sorted(maps.Keys(by)) {
+		if k != "registered" && k != "accepted" && by[k] > 0 {
+			rest = append(rest, fmt.Sprintf("%s %.0f", k, by[k]))
+		}
+	}
+	c.Note = fmt.Sprintf("%d명 중 %.0f명 처리(registered %.0f, accepted %.0f)", p.Queue.Members, n, by["registered"], by["accepted"])
+	if len(rest) > 0 {
+		c.Note += ", 실패 " + strings.Join(rest, ", ")
+	}
+	var all float64
+	for _, v := range by {
+		all += v
+	}
+	if miss := float64(p.Queue.Members) - all; miss > 0 {
+		// 결과를 남기지 않은 회원: VU 가 모자라 시작하지 못했거나(k6 dropped_iterations) 처리 기한에 끊겼다
+		c.Note += fmt.Sprintf(", 결과 없음 %.0f(시작하지 못했거나 처리 기한에 끊겼다)", miss)
+	}
+	return c, ""
 }
 
 func latest(a, b time.Time) time.Time {
@@ -410,6 +462,7 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 	abortErr := p.AbortErrorRate / 100
 	abort5xx := cfg.SLO.Abort5xxRate / 100
 	var breachSince, failSince time.Time
+	var done map[int]bool // 이미 멈춘 태스크. 지표가 끊겨도 판정 불가로 보지 않는다
 
 	stop := func(res report.Result, reason string, byCriteria bool) outcome {
 		now := d.Clock.Now()
@@ -429,11 +482,17 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 		states, err := d.Runner.Describe(ctx, arns, container)
 		if err == nil {
 			stopped := 0
+			done = map[int]bool{}
 			for i, s := range states {
 				if s.LastStatus != "STOPPED" {
 					continue
 				}
 				stopped++
+				done[i] = true
+				// queue는 맡은 회원을 모두 처리하면 처리 기한 전에 끝난다. 정상 종료(0)는 일찍 끝나도 중단이 아니다
+				if p.Queue != nil && s.ExitCode != nil && *s.ExitCode == 0 {
+					continue
+				}
 				// 계획한 끝 시각보다 일찍 끝난 태스크가 있으면 남은 태스크만으로는 계획한 부하가 아니다
 				if now.Before(plannedEnd.Add(-endTolerance)) {
 					switch c := s.ExitCode; {
@@ -485,6 +544,9 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 				breachSince = time.Time{}
 			}
 			for i := range arns {
+				if done[i] {
+					continue
+				}
 				age, ok := seen[strconv.Itoa(i)]
 				if !ok || math.IsNaN(age) {
 					age = now.Sub(startAt).Seconds()

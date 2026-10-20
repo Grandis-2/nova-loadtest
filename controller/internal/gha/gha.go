@@ -119,13 +119,19 @@ func Inputs(getenv func(string) string) (plan.Input, error) {
 	}
 	num("LT_PEAK_RPS", func(f float64) { in.PeakRPS = f })
 	num("LT_ABORT_ERROR_RATE", func(f float64) { in.AbortErrorRate = f })
-	if v := strings.TrimSpace(getenv("LT_RUNNERS")); v != "" {
+	integer := func(name string, set func(int)) {
+		v := strings.TrimSpace(getenv(name))
+		if v == "" {
+			return
+		}
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("runners %q 는 정수여야 한다", v))
+			errs = append(errs, fmt.Errorf("%s %q 는 정수여야 한다", strings.ToLower(strings.TrimPrefix(name, "LT_")), v))
 		}
-		in.Runners = n
+		set(n)
 	}
+	integer("LT_RUNNERS", func(n int) { in.Runners = n })
+	integer("LT_MEMBERS", func(n int) { in.Members = n })
 	if f := strings.TrimSpace(getenv("LT_FLOWS")); f != "" {
 		for _, x := range strings.Split(f, ",") {
 			if x = strings.TrimSpace(x); x != "" {

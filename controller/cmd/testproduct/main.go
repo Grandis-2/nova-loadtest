@@ -207,7 +207,7 @@ func guide(ps []testproduct.Product, spike, rush bool) {
 	}
 	if !spike {
 		p := ps[0]
-		fmt.Println("loadtest-<시나리오>.yml 입력(smoke, load, spike, stress, soak)")
+		fmt.Println("loadtest-<시나리오>.yml 입력(smoke, load, spike, queue, stress, soak)")
 		fmt.Printf("  product_id: %s\n", p.ID)
 		fmt.Printf("\n%s 이후에 실행한다(회차가 열린 뒤).\n", local(p.OpensAt))
 		fmt.Println("열린 이 상품으로 spike 도 할 수 있다. open_at 과 prep_product_id 를 비우면 준비 구간이 끝나는 대로 몰린다.")

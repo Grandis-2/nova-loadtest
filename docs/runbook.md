@@ -26,7 +26,7 @@
 ### 이미지와 클러스터
 
 - [ ] main의 `build.yml` 마지막 실행이 성공했다(`latest`가 main을 가리킨다). 실패했으면 [build.yml 이 실패했을 때](#buildyml-이-실패했을-때)를 본다
-- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest smoke`, `loadtest load`, `loadtest spike`, `loadtest rush`, `loadtest stress`, `loadtest soak` 여섯 워크플로 모두에 진행 중이거나 기다리는 실행이 없다(공통 실행 `_loadtest.yml`은 실행 목록이 따로 없다)
+- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest smoke`, `loadtest load`, `loadtest spike`, `loadtest rush`, `loadtest queue`, `loadtest stress`, `loadtest soak` 일곱 워크플로 모두에 진행 중이거나 기다리는 실행이 없다(공통 실행 `_loadtest.yml`은 실행 목록이 따로 없다)
 
 ### 시험 상품
 
@@ -39,7 +39,7 @@
 ```sh
 read -rs NOVA_ADMIN_TOKEN && export NOVA_ADMIN_TOKEN   # 관리자 화면에 로그인한 세션의 토큰
 go run ./controller/cmd/testproduct -dry-run           # 보낼 본문 확인
-go run ./controller/cmd/testproduct                    # smoke, load, stress, soak: 상품 하나
+go run ./controller/cmd/testproduct                    # smoke, load, queue, stress, soak: 상품 하나
 go run ./controller/cmd/testproduct -spike             # spike: 준비 상품과 진입 상품
 go run ./controller/cmd/testproduct -rush              # rush: 상품 하나, 회차가 열리기 전에 실행
 unset NOVA_ADMIN_TOKEN
@@ -56,6 +56,7 @@ unset NOVA_ADMIN_TOKEN
 - spike는 준비 상품을 먼저 열고, 진입 상품은 그 25분 뒤(`-open-at`)에 연다. 준비 상품이 열린 뒤, 진입 상품 오픈 15분 전까지 실행한다. `-open-at`을 준비 상품 오픈 15분 안으로 주면 거절하고, 75분보다 멀게 주면 `open_at`이 1시간 안에 들도록 출력하는 실행 시작 시각을 늦춘다.
 - 이미 열린 상품으로 spike를 하려면 `open_at`과 `prep_product_id`를 비운다. 사전 점검은 상품이 열려 있는지 확인하고, 준비 구간이 끝나는 대로 몰림이 시작된다.
 - rush는 회차가 열리기 전에 실행한다. 상품을 만든 뒤, 회차 오픈 15분 전까지 실행한다(토큰 5,000개 발급과 k6 기동이 그 사이에 든다).
+- queue는 회차가 열린 뒤에 실행한다(아직 열리지 않았으면 `open_at`에 오픈 시각을 넣는다). 사전예약에는 재고 한도가 없어 한 상품에 인원 모두가 접수할 수 있다. waitingroom의 최대 대기 시간은 기본이 제한 없음이다. 운영자가 정해 두었다면 줄이 그 상한(입장 속도 × 최대 대기 시간)을 넘을 때 `QUEUE_FULL`을 받고, 그 회원은 10초 뒤에 다시 진입하므로 처리가 늦어진다.
 - 비공개 상품은 대기열이 줄을 열지 않으므로 공개로 만든다. 이름이 `[부하 시험]`으로 시작해 실제 사용자도 시험 상품임을 알 수 있다.
 - 중간에 실패해도 이미 만든 상품은 남는다. 출력된 상품 ID와 `Idempotency-Key`로 [끝난 뒤](#끝난-뒤)의 순서대로 정리한다.
 
@@ -99,16 +100,18 @@ Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(�
 | `loadtest-load.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-spike.yml` | `product_id`(필수), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-rush.yml` | `product_id`(필수), `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
+| `loadtest-queue.yml` | `product_id`(필수), `members`, `peak_rps`, `duration`, `open_at`, `runners`, `abort_error_rate` |
 | `loadtest-stress.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-soak.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 
 | 입력 | 내용 | 비우면 |
 |---|---|---|
-| `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. `prep_product_id`를 비우면 조회, 결제, 취소의 준비 상품도 된다(그 흐름이 있으면 둘 중 하나는 넣는다). spike, rush는 입력 화면에서도 필수다 | |
-| `prep_product_id` | 준비 구간 상품. `open_at`을 넣은 spike는 필수, rush는 비운다 | `product_id` |
+| `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. `prep_product_id`를 비우면 조회, 결제, 취소의 준비 상품도 된다(그 흐름이 있으면 둘 중 하나는 넣는다). spike, rush, queue는 입력 화면에서도 필수다 | |
+| `prep_product_id` | 준비 구간 상품. `open_at`을 넣은 spike는 필수, rush와 queue는 비운다 | `product_id` |
 | `open_at` | 판매가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다. 그 밖의 시나리오는 비우면 바로 시작한다 | 바로 시작 |
 | `peak_rps` | 흐름 시작 수 합계(초당) | 시나리오 기본값 |
-| `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`) | 시나리오 기본값 |
+| `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`). queue의 `duration`은 처리 기한이다 | 시나리오 기본값(queue는 최소 처리 시간 + 3분) |
+| `members` | queue에서 진입하는 인원(최대 99,980). 회원마다 한 번씩 진입한다 | 5,000 |
 | `runners` | k6 태스크 대수. 계산한 값보다 적으면 멈춘다 | 계산한 값 |
 | `flows` | 돌릴 흐름(쉼표로 구분). 상품 조회만: `catalog` | 시나리오 기본값 |
 | `abort_error_rate` | 중단할 오류율(%) | 5 |
@@ -118,6 +121,7 @@ Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(�
 ```sh
 gh workflow run loadtest-smoke.yml --ref main -f flows=catalog
 gh workflow run loadtest-spike.yml --ref main -f product_id=<진입 상품> -f prep_product_id=<준비 상품> -f open_at=<UTC 시각>
+gh workflow run loadtest-queue.yml --ref main -f product_id=<열린 상품> -f members=10000
 ```
 
 ### 계획 표 확인

@@ -179,6 +179,13 @@ func (m Metrics) Scenarios(ctx context.Context, start, end time.Time) (map[strin
 	return m.byLabel(ctx, q, end, "scenario")
 }
 
+// Outcomes는 구간 [start, end]의 진입 결과(outcome)별 수다. 누적 카운터의 구간 최댓값을 더한다. 시계열이 처음 생긴
+// 표본은 increase 가 세지 않아(앞 표본이 없다) 결과가 몇 건뿐인 시계열을 0으로 셀 수 있다
+func (m Metrics) Outcomes(ctx context.Context, start, end time.Time) (map[string]float64, error) {
+	q := fmt.Sprintf(`sum by (outcome) (max_over_time(%s{%s}[%s]))`, m.Names.Outcomes, m.sel(""), rng(end.Sub(start)))
+	return m.byLabel(ctx, q, end, "outcome")
+}
+
 func (m Metrics) byLabel(ctx context.Context, q string, at time.Time, label string) (map[string]float64, error) {
 	out, err := m.Q.Query(ctx, q, at)
 	if err != nil {

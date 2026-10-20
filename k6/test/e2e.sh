@@ -4,6 +4,7 @@
 #
 #   k6/test/e2e.sh ok       다섯 흐름 smoke(30초). 0으로 끝나고, 규칙 위반이 없고, 모든 경로를 불렀는지 본다
 #   k6/test/e2e.sh rush     rush 를 작게 줄여(회원 10명) 접수, 등록 알림, 주문, 결제 시도까지 가는지 본다(약 40초)
+#   k6/test/e2e.sh queue    queue 30명이 모두 접수하고, 처리 기한(약 3분)을 기다리지 않고 바로 끝나는지 본다(약 20초)
 #   k6/test/e2e.sh error    오류가 계속되면 중단 임계치로 99로 끝나는지 본다(약 1분 30초)
 #   k6/test/e2e.sh sigterm  도중에 멈추면 105로 끝나고 요약을 올리는지 본다
 #   k6/test/e2e.sh tokenfail 토큰을 받지 못하면 k6 를 띄우지 않고 120으로 끝나며, 오류를 담은 결과를 올리는지 본다
@@ -11,7 +12,7 @@
 # 이미지는 미리 빌드해 둔다: docker buildx build --platform linux/amd64 -f k6/Dockerfile -t nova-loadtest/k6:dev --load .
 set -eu
 
-mode=${1:?ok, rush, error, sigterm, tokenfail 중 하나}
+mode=${1:?ok, rush, queue, error, sigterm, tokenfail 중 하나}
 image=${K6_IMAGE:-nova-loadtest/k6:dev}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -73,12 +74,16 @@ for s in p["scenarios"]:
 json.dump(p, open(sys.argv[2], "w"))
 PY
     ;;
+  queue)
+    # 계획을 줄이지 않고 그대로 쓴다. 30명을 3초 동안 들여보낸다
+    "$work/plan" -test-id "$test_id" -scenario queue -product-id "$product" -members 30 -peak-rps 10 -json "$work/plan.json"
+    ;;
   error | sigterm | tokenfail) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
   *) echo "모드 $mode 를 모른다" >&2; exit 2 ;;
 esac
 
 tokens_env=""
-if [ "$mode" = ok ] || [ "$mode" = rush ]; then
+if [ "$mode" = ok ] || [ "$mode" = rush ] || [ "$mode" = queue ]; then
   # 토큰. 시험용 키를 새로 만든다(운영 키는 쓰지 않는다)
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/key.pem" 2> /dev/null
   members=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["members"]))' "$work/plan.json")
@@ -109,6 +114,7 @@ if [ "$mode" = sigterm ]; then
   docker stop -t 60 "$k6c" > /dev/null
 fi
 code=$(docker wait "$k6c")
+elapsed=$(($(date -u +%s) - $(date -u -d "$start_at" +%s)))
 docker logs "$k6c" > "$work/k6.log" 2>&1 || true
 tail -n 5 "$work/k6.log"
 
@@ -146,6 +152,16 @@ case "$mode" in
       n=$(route_count "$r")
       expect "경로를 불렀다: $r ($n번)" "$([ "$n" -gt 0 ] && echo yes || echo no)" yes
     done
+    ;;
+  queue)
+    expect "종료 코드" "$code" 0
+    expect "올린 요약" "$uploaded" "0 True"
+    expect "fake-api 가 센 규칙 위반" "$violations" "{}"
+    expect "접수한 회원" "$(route_count "POST /api/v1/preorders")" 30
+    outcomes=$(printf '%s' "$summary" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["summary"]["metrics"]["entry_outcome"]["values"]["count"]))' 2> /dev/null || echo "없음")
+    expect "진입 결과(entry_outcome)" "$outcomes" 30
+    # 처리 기한은 180초가 넘는다. 모두 처리되면 그 전에 끝나야 한다
+    expect "처리 기한 전에 끝났다(${elapsed}초)" "$([ "$elapsed" -lt 60 ] && echo yes || echo no)" yes
     ;;
   error)
     expect "중단 임계치로 끝난 종료 코드" "$code" 99

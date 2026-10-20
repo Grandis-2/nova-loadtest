@@ -21,13 +21,14 @@ func main() {
 	var in plan.Input
 	var flows, now, jsonOut, summaryOut string
 	flag.StringVar(&in.TestID, "test-id", "", "시험 ID(lt-<yyyymmddThhmm>-<번호>)")
-	flag.StringVar(&in.Scenario, "scenario", "smoke", "smoke, load, spike, rush, stress, soak")
+	flag.StringVar(&in.Scenario, "scenario", "smoke", "smoke, load, spike, rush, queue, stress, soak")
 	flag.StringVar(&in.ProductID, "product-id", "", "진입과 접수에 쓰는 시험 상품 ID")
 	flag.StringVar(&in.PrepProductID, "prep-product-id", "", "준비 구간 시험 상품 ID(기본 product-id)")
 	flag.StringVar(&in.OpenAt, "open-at", "", "회차가 열리는 시각(RFC 3339, UTC)")
 	flag.Float64Var(&in.PeakRPS, "peak-rps", 0, "최대 흐름 시작 수(초당). 0이면 시나리오 기본값")
 	flag.StringVar(&in.Duration, "duration", "", "최대치를 유지하는 시간")
 	flag.StringVar(&in.RampUp, "ramp-up", "", "최대치까지 올리는 시간")
+	flag.IntVar(&in.Members, "members", 0, "queue 에서 진입하는 인원. 0이면 시나리오 기본값")
 	flag.IntVar(&in.Runners, "runners", 0, "k6 태스크 대수. 0이면 계산한다")
 	flag.Float64Var(&in.AbortErrorRate, "abort-error-rate", 0, "중단 기준 오류율(%). 0이면 기본값")
 	flag.StringVar(&flows, "flows", "", "쉼표로 구분한 흐름(비면 모두)")

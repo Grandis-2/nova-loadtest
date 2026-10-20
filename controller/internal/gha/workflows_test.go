@@ -86,6 +86,7 @@ func TestScenarioWorkflows(t *testing.T) {
 	}
 
 	defaultRe := regexp.MustCompile(`기본 (\S+)$`)
+	marginRe := regexp.MustCompile(`최소 시간 \+ (\S+)$`)
 	for _, name := range config.ScenarioOrder {
 		t.Run(name, func(t *testing.T) {
 			w := readWorkflow(t, "loadtest-"+name+".yml")
@@ -122,6 +123,14 @@ func TestScenarioWorkflows(t *testing.T) {
 
 			// 설명에 적은 기본값이 scenarios.yml 과 같은가
 			sc := cfg.Scenarios[name]
+			// queue 의 duration 은 비우면 최소 처리 시간 + deadline_margin 이다
+			if m := marginRe.FindStringSubmatch(w.On.Dispatch.Inputs["duration"].Description); m != nil {
+				if d, err := time.ParseDuration(m[1]); err != nil || d != sc.DeadlineMargin.D() {
+					t.Errorf("duration 설명의 여유 %s 가 scenarios.yml deadline_margin %s 와 다르다", m[1], sc.DeadlineMargin.D())
+				}
+			} else if sc.Shape == config.ShapeQueue {
+				t.Errorf("duration 설명에 비웠을 때의 여유(최소 시간 + <deadline_margin>)가 없다")
+			}
 			for k, in := range w.On.Dispatch.Inputs {
 				m := defaultRe.FindStringSubmatch(in.Description)
 				if m == nil {
@@ -136,6 +145,8 @@ func TestScenarioWorkflows(t *testing.T) {
 					ok = err == nil && (k == "duration" && d == sc.Duration.D() || k == "ramp_up" && d == sc.RampUp.D())
 				case "abort_error_rate":
 					ok = m[1] == strconv.FormatFloat(cfg.SLO.AbortErrorRate, 'f', -1, 64)
+				case "members":
+					ok = m[1] == strconv.Itoa(sc.Members)
 				default:
 					t.Errorf("%s: 설명의 기본값을 검사하지 못한다", k)
 					continue
@@ -172,6 +183,8 @@ func TestScenarioWorkflows(t *testing.T) {
 					in.RampUp = "2m"
 				case "flows":
 					in.Flows = []string{"entry"}
+				case "members":
+					in.Members = 100
 				default:
 					continue // 모든 시나리오가 쓰거나(scenario, product_id, peak_rps, runners, abort_error_rate) 따로 정한다
 				}

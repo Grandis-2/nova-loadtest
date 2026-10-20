@@ -72,7 +72,11 @@ type fakeMetrics struct {
 	window  func(start, end time.Time) map[string]mimir.Stat
 	// scenarios 가 nil 이면 모든 k6 시나리오가 요청을 보냈다
 	scenarios func() map[string]float64
-	queried   bool
+	// outcomes 가 nil 이면 queue 의 members 명이 모두 등록까지 갔다
+	outcomes    func() map[string]float64
+	members     int
+	outcomesEnd time.Time // Outcomes 를 조회한 구간의 끝
+	queried     bool
 }
 
 func (m *fakeMetrics) ErrorRate(_ context.Context, at time.Time) (float64, error) {
@@ -129,10 +133,18 @@ func (m *fakeMetrics) Scenarios(context.Context, time.Time, time.Time) (map[stri
 	return allScenarios(), nil
 }
 
+func (m *fakeMetrics) Outcomes(_ context.Context, _, end time.Time) (map[string]float64, error) {
+	m.outcomesEnd = end
+	if m.outcomes != nil {
+		return m.outcomes(), nil
+	}
+	return map[string]float64{"registered": float64(m.members)}, nil
+}
+
 // allScenarios 는 계획이 만드는 k6 시나리오가 모두 요청을 보낸 구간 값이다
 func allScenarios() map[string]float64 {
 	out := map[string]float64{}
-	for _, n := range []string{"catalog", "preorders", "entry", "order", "cancel", "entry_burst", "entry_observe", "rush"} {
+	for _, n := range []string{"catalog", "preorders", "entry", "order", "cancel", "entry_burst", "entry_observe", "rush", "queue"} {
 		out[n] = 100
 	}
 	return out
@@ -179,6 +191,9 @@ func newFixture(t *testing.T, scenario string, k6 func(env map[string]string, n 
 	}
 	pj, _ := json.Marshal(p)
 	f := &fixture{store: &memStore{m: map[string][]byte{}}, metrics: &fakeMetrics{tasks: p.Tasks}, clock: clk, plan: p}
+	if p.Queue != nil {
+		f.metrics.members = p.Queue.Members
+	}
 	f.ecs = &fakeecs.Fake{Clock: clk, Behave: func(family string, env map[string]string, n int) fakeecs.Behavior {
 		if family == minter {
 			return fakeecs.Behavior{RunningAfter: 5 * time.Second, ExitAt: clk.Now().Add(40 * time.Second), ExitCode: 0}
@@ -667,4 +682,61 @@ func TestStressEarlyNormalExitJudgesAllSteps(t *testing.T) {
 	if len(s.Windows) != 5 || s.LastPassingStep != "step5" {
 		t.Fatalf("다섯 단계를 모두 판정해야 한다: %d %q (%s %s)", len(s.Windows), s.LastPassingStep, s.Result, s.Reason)
 	}
+}
+
+// queue 는 모두 처리되면 처리 기한 전에 끝난다. 먼저 끝난 태스크는 지표가 끊겨도 판정 불가가 아니다
+func TestQueueEndsEarly(t *testing.T) {
+	var startAt time.Time
+	f := newFixture(t, "queue", func(env map[string]string, n int, _ time.Time) fakeecs.Behavior {
+		startAt, _ = time.Parse(time.RFC3339, env["START_AT"])
+		exit := startAt.Add(150 * time.Second) // 줄이 늦게 빠져 처리 기한(219초) 안에 끝난다
+		if n == 0 {
+			exit = startAt.Add(40 * time.Second)
+		}
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: exit, ExitCode: 0, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	f.metrics.seen = func(at time.Time) (map[string]float64, error) {
+		out := map[string]float64{}
+		for i := range f.plan.Tasks {
+			out[fmt.Sprint(i)] = 5
+		}
+		out["0"] = at.Sub(startAt.Add(40 * time.Second)).Seconds() // 태스크 0 은 먼저 끝났다
+		return out, nil
+	}
+	s := f.execute(t)
+	expect(t, s, report.Pass, "")
+	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
+	if c.Name != "queue:processed" || !c.Pass || !strings.Contains(c.Note, "5000명 중 5000명 처리") {
+		t.Fatalf("처리 인원을 판정해야 한다: %+v", c)
+	}
+	if len(f.ecs.Stops) != 0 {
+		t.Fatalf("일찍 끝난 것은 중단이 아니다: %v", f.ecs.Stops)
+	}
+	// 마지막 태스크가 끝난 뒤 마지막 지표가 Mimir 에 들어올 때까지 기다렸다가 센다
+	if got := f.metrics.outcomesEnd.Sub(startAt.Add(150 * time.Second)); got < ingestDelay {
+		t.Fatalf("처리 인원을 마지막 태스크가 끝나고 %s 뒤에 셌다(%s 이상 기다려야 한다)", got, ingestDelay)
+	}
+}
+
+func TestQueueNotAllProcessed(t *testing.T) {
+	f := newFixture(t, "queue", nil)
+	f.metrics.outcomes = func() map[string]float64 {
+		return map[string]float64{"registered": 4900, "accepted": 90, "poll_limit": 4, "accept_failed": 1}
+	}
+	s := f.execute(t)
+	expect(t, s, report.Fail, "기준을 넘었다")
+	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
+	if c.Pass || c.Note != "5000명 중 4990명 처리(registered 4900, accepted 90), 실패 accept_failed 1, poll_limit 4, "+
+		"결과 없음 5(시작하지 못했거나 처리 기한에 끊겼다)" {
+		t.Fatalf("모자란 인원과 실패를 보여야 한다: %+v", c)
+	}
+}
+
+// queue 도 0 이 아닌 종료 코드로 일찍 끝나면 중단이다
+func TestQueueEarlyFailureAborts(t *testing.T) {
+	f := newFixture(t, "queue", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
+		start, _ := time.Parse(time.RFC3339, env["START_AT"])
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(90 * time.Second), ExitCode: 1, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	expect(t, f.execute(t), report.Aborted, "일찍 끝났다")
 }

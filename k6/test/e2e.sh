@@ -3,6 +3,7 @@
 # 로컬과 CI(k6-safety)가 같이 쓴다. Linux 에서 Docker 와 Go 가 있어야 한다.
 #
 #   k6/test/e2e.sh ok       다섯 흐름 smoke(30초). 0으로 끝나고, 규칙 위반이 없고, 모든 경로를 불렀는지 본다
+#   k6/test/e2e.sh rush     rush 를 작게 줄여(회원 10명) 접수, 등록 알림, 주문, 결제 시도까지 가는지 본다(약 40초)
 #   k6/test/e2e.sh error    오류가 계속되면 중단 임계치로 99로 끝나는지 본다(약 1분 30초)
 #   k6/test/e2e.sh sigterm  도중에 멈추면 105로 끝나고 요약을 올리는지 본다
 #   k6/test/e2e.sh tokenfail 토큰을 받지 못하면 k6 를 띄우지 않고 120으로 끝나며, 오류를 담은 결과를 올리는지 본다
@@ -10,7 +11,7 @@
 # 이미지는 미리 빌드해 둔다: docker buildx build --platform linux/amd64 -f k6/Dockerfile -t nova-loadtest/k6:dev --load .
 set -eu
 
-mode=${1:?ok, error, sigterm, tokenfail 중 하나}
+mode=${1:?ok, rush, error, sigterm, tokenfail 중 하나}
 image=${K6_IMAGE:-nova-loadtest/k6:dev}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -54,12 +55,30 @@ curl -sf -X PUT "$AWS_ENDPOINT_URL/e2e-bucket" > /dev/null
 # 계획. ok 는 다섯 흐름, 나머지는 상품 조회만(준비 구간과 등록 대기가 없어 바로 시작한다)
 case "$mode" in
   ok) "$work/plan" -test-id "$test_id" -scenario smoke -duration 30s -product-id "$product" -json "$work/plan.json" ;;
+  rush)
+    # 계획은 기본값으로 계산하고, 시간이 짧게 끝나도록 몰림과 배경만 줄인다(회원 10명, 알림 확인 1초 간격)
+    "$work/plan" -test-id "$test_id" -scenario rush -product-id "$product" -open-at 2026-10-20T06:30:00Z \
+      -now 2026-10-20T06:00:00Z -json "$work/plan-full.json"
+    python3 - "$work/plan-full.json" "$work/plan.json" << 'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+p["open_at"] = None
+p["members"]["a"]["count"] = 10
+p["rush"].update(pay_ratio=1, notify_interval_seconds=1, notify_timeout_seconds=20)
+for s in p["scenarios"]:
+    if s["flow"] == "rush":
+        s.update(rate=60, duration="10s", preAllocatedVUs=10, maxVUs=10, gracefulStop="40s")
+    else:
+        s.update(rate=60, duration="30s", preAllocatedVUs=2, maxVUs=2)
+json.dump(p, open(sys.argv[2], "w"))
+PY
+    ;;
   error | sigterm | tokenfail) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
   *) echo "모드 $mode 를 모른다" >&2; exit 2 ;;
 esac
 
 tokens_env=""
-if [ "$mode" = ok ]; then
+if [ "$mode" = ok ] || [ "$mode" = rush ]; then
   # 토큰. 시험용 키를 새로 만든다(운영 키는 쓰지 않는다)
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/key.pem" 2> /dev/null
   members=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["members"]))' "$work/plan.json")
@@ -110,6 +129,19 @@ case "$mode" in
     for r in "GET /api/v1/products" "GET /api/v1/products/{id}" "GET /api/v1/categories" \
       "POST /api/v1/preorders/queue" "GET /api/v1/preorders/queue" "POST /api/v1/preorders" "GET /api/v1/preorders" \
       "GET /api/v1/preorders/active" "POST /api/v1/preorders/{id}/cancel" "POST /api/v1/orders" "POST /api/v1/orders/{id}/payment-attempts"; do
+      n=$(route_count "$r")
+      expect "경로를 불렀다: $r ($n번)" "$([ "$n" -gt 0 ] && echo yes || echo no)" yes
+    done
+    ;;
+  rush)
+    expect "종료 코드" "$code" 0
+    expect "올린 요약" "$uploaded" "0 True"
+    expect "fake-api 가 센 규칙 위반" "$violations" "{}"
+    # 회원 10명이 모두 결제 시도까지 갔는지(pay_ratio 1)
+    expect "결제 시도까지 간 회원" "$(route_count "POST /api/v1/orders/{id}/payment-attempts")" 10
+    for r in "GET /api/v1/products/{id}" "POST /api/v1/preorders/queue" "POST /api/v1/preorders" \
+      "GET /api/v1/notifications/unread-count" "GET /api/v1/notifications" "GET /api/v1/preorders/{id}" \
+      "POST /api/v1/orders" "POST /api/v1/orders/{id}/payment-attempts"; do
       n=$(route_count "$r")
       expect "경로를 불렀다: $r ($n번)" "$([ "$n" -gt 0 ] && echo yes || echo no)" yes
     done

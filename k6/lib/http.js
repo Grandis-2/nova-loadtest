@@ -19,6 +19,8 @@ export const TEMPLATES = Object.freeze([
   '/api/v1/preorders/{id}/cancel',
   '/api/v1/orders',
   '/api/v1/orders/{id}/payment-attempts',
+  '/api/v1/notifications',
+  '/api/v1/notifications/unread-count',
 ]);
 
 const allowed = new Set(TEMPLATES);

@@ -57,7 +57,15 @@ const (
 	ShapeRamping  Shape = "ramping"
 	ShapeSpike    Shape = "spike"
 	ShapeStep     Shape = "step"
+	ShapeRush     Shape = "rush"
 )
+
+// Rush는 rush 시나리오에서 몰린 회원이 접수 뒤에 이어 가는 값이다
+type Rush struct {
+	PayRatio       float64  `yaml:"pay_ratio"`       // 등록 알림을 기다려 바로 결제하는 회원의 비율(0~1)
+	NotifyInterval Duration `yaml:"notify_interval"` // 안 읽은 알림 수를 확인하는 간격
+	NotifyTimeout  Duration `yaml:"notify_timeout"`  // 접수 뒤 알림을 기다리는 상한. 넘으면 결제를 건너뛴다
+}
 
 type Scenario struct {
 	Shape           Shape              `yaml:"shape"`
@@ -74,6 +82,7 @@ type Scenario struct {
 	MaxVUs          int                `yaml:"max_vus"`
 	WAFExempt       bool               `yaml:"waf_exempt"`
 	PoolB           int                `yaml:"pool_b"`
+	Rush            Rush               `yaml:"rush"`
 }
 
 type Runner struct {
@@ -155,7 +164,7 @@ type Config struct {
 var FlowOrder = []string{"catalog", "preorders", "entry", "order", "cancel"}
 
 // ScenarioOrder는 시나리오 이름의 순서다.
-var ScenarioOrder = []string{"smoke", "load", "spike", "stress", "soak"}
+var ScenarioOrder = []string{"smoke", "load", "spike", "rush", "stress", "soak"}
 
 // Default는 실행 파일에 들어 있는 scenarios.yml이다.
 func Default() (*Config, error) { return Parse(embedded) }
@@ -233,7 +242,7 @@ func (c *Config) Validate() error {
 	}
 
 	if len(c.Scenarios) != len(ScenarioOrder) {
-		bad("scenarios는 %v 다섯 개여야 한다", ScenarioOrder)
+		bad("scenarios는 %v %d개여야 한다", ScenarioOrder, len(ScenarioOrder))
 	}
 	for _, name := range ScenarioOrder {
 		s, ok := c.Scenarios[name]
@@ -241,7 +250,9 @@ func (c *Config) Validate() error {
 			bad("scenarios.%s가 없다", name)
 			continue
 		}
-		if !pos(s.PeakRPS, s.MaxRPS) || s.MaxRPS < s.PeakRPS || s.MaxVUs <= 0 || s.MaxDuration <= 0 || s.PoolB <= 0 {
+		// rush는 준비 구간이 없어 pool_b를 쓰지 않는다
+		if !pos(s.PeakRPS, s.MaxRPS) || s.MaxRPS < s.PeakRPS || s.MaxVUs <= 0 || s.MaxDuration <= 0 ||
+			(s.PoolB <= 0 && s.Shape != ShapeRush) {
 			bad("scenarios.%s: peak_rps, max_rps(≥ peak_rps), max_vus, max_duration, pool_b를 확인한다", name)
 		}
 		switch s.Shape {
@@ -252,13 +263,25 @@ func (c *Config) Validate() error {
 			if s.RampUp < 0 || (s.Shape == ShapeRamping && s.RampUp < Duration(time.Second)) {
 				bad("scenarios.%s.ramp_up은 음수일 수 없고, ramping이면 1초 이상이어야 한다", name)
 			}
-		case ShapeSpike:
+		case ShapeSpike, ShapeRush:
+			if s.Shape == ShapeRush {
+				r := s.Rush
+				if !(r.PayRatio >= 0 && r.PayRatio <= 1) || r.NotifyInterval < Duration(time.Second) ||
+					r.NotifyTimeout < r.NotifyInterval || s.Duration <= r.NotifyTimeout || s.ObserveEntryRPS != 0 {
+					bad("scenarios.%s.rush: pay_ratio는 0~1, notify_interval은 1초 이상, notify_timeout은 그 이상이고 "+
+						"duration(관찰 시간)보다 짧아야 한다. observe_entry_rps는 쓰지 않는다", name)
+				}
+			}
 			if !pos(s.BurstSeconds) || s.Duration < Duration(time.Second) || !nonneg(s.ObserveEntryRPS) {
 				bad("scenarios.%s: burst_seconds, duration(관찰 시간 1초 이상)이 필요하고 observe_entry_rps는 0 이상이어야 한다", name)
 			}
 			for f, v := range s.Background {
 				if _, ok := c.Flows[f]; !ok || f == "entry" {
 					bad("scenarios.%s.background.%s: 진입을 뺀 흐름 이름이어야 한다", name, f)
+				}
+				// rush는 준비 구간이 없어 예약이 필요한 배경(풀 B, C)을 돌릴 수 없다
+				if s.Shape == ShapeRush && c.Flows[f].Pool != PoolNone {
+					bad("scenarios.%s.background.%s: rush의 배경은 회원이 필요 없는 흐름이어야 한다", name, f)
 				}
 				if !nonneg(v) {
 					bad("scenarios.%s.background.%s: 0 이상이어야 한다", name, f)

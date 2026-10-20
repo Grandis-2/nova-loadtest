@@ -34,6 +34,10 @@ func (p *Plan) Markdown() string {
 	if m := p.Members; m != nil {
 		row("회원", fmt.Sprintf("%d명 (풀 A %d, B %d, C %d)", m.Total(), m.A.Count, m.B.Count, m.C.Count))
 	}
+	if r := p.Rush; r != nil {
+		row("rush 결제", fmt.Sprintf("접수한 회원의 %.0f%%, 알림 확인 %d초 간격, 상한 %s", r.PayRatio*100,
+			r.NotifyIntervalSeconds, hms(r.NotifyTimeoutSeconds)))
+	}
 	row("본 시험", fmt.Sprintf("%s ~ %s (START_AT 기준)", hms(p.MainStart), hms(p.MainEnd)))
 	row("예상 시간", hms(p.Estimates.TotalSeconds))
 	row("중단 기준 오류율", fmt.Sprintf("%.1f%%", p.AbortErrorRate))

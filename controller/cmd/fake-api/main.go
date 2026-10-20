@@ -30,23 +30,35 @@ type preorder struct {
 	Status    string `json:"status"`
 }
 
+// notification 은 등록 알림이다. 실제로는 worker 가 등록하고 member 가 저장한 뒤에 보이므로 visible 뒤부터 보인다
+type notification struct {
+	ID      string
+	Target  string
+	At      time.Time
+	Visible time.Time
+}
+
 type server struct {
 	mode, header string
 
 	mu         sync.Mutex
 	routes     map[string]int
 	violations map[string]int
-	polls      map[string]int         // 회원별 순번 확인 수
-	preorders  map[string][]*preorder // 회원 sub → 예약
-	idem       map[string]string      // 멱등 키 → 예약 ID
+	polls      map[string]int            // 회원별 순번 확인 수
+	preorders  map[string][]*preorder    // 회원 sub → 예약
+	idem       map[string]string         // 멱등 키 → 예약 ID
+	notes      map[string][]notification // 회원 sub → 알림
 	seq        int
 }
+
+// notifyDelay 는 접수부터 등록 알림이 보일 때까지의 시간이다
+const notifyDelay = 2 * time.Second
 
 func main() {
 	s := &server{
 		mode: envOr("FAKE_MODE", "ok"), header: os.Getenv("FAKE_HEADER"),
 		routes: map[string]int{}, violations: map[string]int{}, polls: map[string]int{},
-		preorders: map[string][]*preorder{}, idem: map[string]string{},
+		preorders: map[string][]*preorder{}, idem: map[string]string{}, notes: map[string][]notification{},
 	}
 	addr := envOr("FAKE_ADDR", ":8080")
 	log.Printf("fake-api %s (mode=%s)", addr, s.mode)
@@ -159,12 +171,48 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		}
 		s.mu.Unlock()
 		ok(w, 200, map[string]any{"items": items, "nextCursor": nil})
-	case "GET /api/v1/preorders/active", "GET /api/v1/preorders/{id}":
+	case "GET /api/v1/preorders/active":
 		if _, good := s.auth(r); !good {
 			fail(w, 401, "UNAUTHENTICATED")
 			return
 		}
 		ok(w, 200, map[string]any{"items": []any{}})
+	case "GET /api/v1/preorders/{id}":
+		sub, good := s.auth(r)
+		if !good {
+			fail(w, 401, "UNAUTHENTICATED")
+			return
+		}
+		id := lastID(r.URL.Path, 0)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, p := range s.preorders[sub] {
+			if p.ID == id {
+				ok(w, 200, p)
+				return
+			}
+		}
+		fail(w, 404, "PREORDER_NOT_FOUND")
+	case "GET /api/v1/notifications/unread-count":
+		sub, good := s.auth(r)
+		if !good {
+			fail(w, 401, "UNAUTHENTICATED")
+			return
+		}
+		ok(w, 200, map[string]any{"count": len(s.visible(sub))})
+	case "GET /api/v1/notifications":
+		sub, good := s.auth(r)
+		if !good {
+			fail(w, 401, "UNAUTHENTICATED")
+			return
+		}
+		items := []map[string]any{}
+		for _, n := range s.visible(sub) {
+			items = append(items, map[string]any{"notificationId": n.ID, "kind": "PREORDER_REGISTERED",
+				"title": "사전예약 등록 완료", "message": "", "target": map[string]any{"type": "PREORDER", "id": n.Target},
+				"read": false, "createdAt": n.At})
+		}
+		ok(w, 200, map[string]any{"items": items, "nextCursor": nil})
 	case "POST /api/v1/preorders/{id}/cancel":
 		sub, good := s.auth(r)
 		if !good {
@@ -241,10 +289,32 @@ func (s *server) accept(w http.ResponseWriter, r *http.Request) {
 		s.idem[key] = id
 		// 실제로는 worker가 등록한 뒤 REGISTERED가 된다. 여기서는 바로 등록된 것으로 둔다
 		s.preorders[sub] = append(s.preorders[sub], &preorder{ID: id, ProductID: body.ProductID, OptionID: body.OptionID, Status: "REGISTERED"})
+		now := time.Now()
+		if len(s.notes[sub]) == 0 {
+			// 지난 시험에서 읽지 않고 남은 다른 예약의 알림
+			s.notes[sub] = append(s.notes[sub], notification{ID: fmt.Sprintf("44444444-0000-4000-9000-%012d", s.seq),
+				Target: "stale-" + id, At: now.Add(-time.Hour), Visible: now.Add(-time.Hour)})
+		}
+		s.notes[sub] = append(s.notes[sub], notification{ID: fmt.Sprintf("44444444-0000-4000-8000-%012d", s.seq), Target: id,
+			At: now, Visible: now.Add(notifyDelay)})
 	}
 	s.mu.Unlock()
 	w.Header().Set("X-Idempotent-Replay", fmt.Sprint(replay))
 	ok(w, 202, map[string]any{"preorderId": id, "status": "PENDING_SYNC", "replayed": replay})
+}
+
+// visible 은 지금 보이는 알림이다. 최신순이다
+func (s *server) visible(sub string) []notification {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var out []notification
+	for i := len(s.notes[sub]) - 1; i >= 0; i-- {
+		if n := s.notes[sub][i]; !now.Before(n.Visible) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // auth는 Bearer 토큰의 sub를 꺼낸다. 서명은 보지 않는다(시험용 서버다)

@@ -78,6 +78,25 @@ scenarios:
     max_vus: 15000
     waf_exempt: true
     pool_b: 1000
+  rush:
+    shape: rush            # 몰린 회원이 줄을 지나 접수하고, 등록 알림을 받아 주문과 결제 시도까지 간다
+    peak_rps: 500          # 몰림의 초당 진입 수(spike 와 같게 두어 비교한다)
+    duration: 10m          # 몰림 뒤 관찰 시간. 알림 대기 상한보다 길어야 한다
+    burst_seconds: 10
+    background:            # 준비 구간이 없어 회원이 필요 없는 상품 조회만 둔다
+      catalog: 200
+    rush:
+      pay_ratio: 0.5       # 바로 결제하는 회원. 나머지는 접수만 하고 떠난다(24시간 안에 나중에 결제)
+      # 안 읽은 알림 수 확인 간격. 화면의 실시간 연결(SSE) 대신 조회로 흉내 낸다. 결제할 2,500명이 함께 기다리면
+      # member(1대)에 초당 250건이 간다. 더 줄이면 실제에 없는 조회가 알림 저장까지 늦출 수 있다
+      notify_interval: 10s
+      # 넘으면 notify_timeout 으로 세고 결제를 건너뛴다. member 의 알림 저장은 태스크당 초당 약 20건(nova-infra
+      # member application.yml)이라 5,000건이면 약 4분, 등록 큐가 비는 약 90초를 더해 마지막 알림은 오픈 뒤 약 6분이다
+      notify_timeout: 8m
+    max_rps: 2000
+    max_duration: 1h
+    max_vus: 15000
+    waf_exempt: true
   stress:
     shape: step
     peak_rps: 808          # 평시 × 8 (마지막 단계)
@@ -121,7 +140,7 @@ members:
 # 시계열 수 계산(시험 하나, Mimir 한도를 지키려고 2만 개 이하로 둔다)
 series:
   limit: 20000
-  names: 12                # tags.name × method 조합
+  names: 14                # tags.name × method 조합
   statuses_per_name: 3     # 추정
   histogram: 18            # 경계 15 + +Inf 버킷 = 16, 합, 개수
   counters_per_name: 2     # http_reqs, http_req_failed

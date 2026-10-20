@@ -152,6 +152,9 @@ func newFixture(t *testing.T, scenario string, k6 func(env map[string]string, n 
 	if scenario == "smoke" {
 		in.Duration = "2m"
 	}
+	if scenario == "rush" {
+		in.OpenAt = t0.Add(20 * time.Minute).Format(time.RFC3339)
+	}
 	p, err := plan.New(cfg, in)
 	if err != nil {
 		t.Fatal(err)
@@ -478,6 +481,35 @@ func TestMissingFlowFails(t *testing.T) {
 	if !found {
 		t.Fatalf("flow:cancel 이 미달로 나와야 한다: %+v", s.Windows[0].ByName)
 	}
+}
+
+// rush 는 몰린 회원이 주문까지 간다. 등록 알림이 오지 않아 주문 요청이 없으면 불합격이다
+func TestRushWithoutOrdersFails(t *testing.T) {
+	f := newFixture(t, "rush", nil)
+	f.metrics.window = func(time.Time, time.Time) map[string]mimir.Stat {
+		by := allFlows(0.99)
+		delete(by, flowName["order"])
+		return by
+	}
+	s := f.execute(t)
+	expect(t, s, report.Fail, "")
+	if len(s.Windows) != 1 || s.Windows[0].Name != "rush" {
+		t.Fatalf("판정 구간은 rush 하나다: %+v", s.Windows)
+	}
+	found := false
+	for _, c := range s.Windows[0].ByName {
+		found = found || (c.Name == "flow:order" && !c.Pass)
+	}
+	if !found {
+		t.Fatalf("flow:order 가 미달로 나와야 한다: %+v", s.Windows[0].ByName)
+	}
+}
+
+// rush 도 대표 요청이 모두 있고 기준 안이면 합격이다
+func TestRushPasses(t *testing.T) {
+	f := newFixture(t, "rush", nil)
+	f.metrics.window = func(time.Time, time.Time) map[string]mimir.Stat { return allFlows(0.99) }
+	expect(t, f.execute(t), report.Pass, "")
 }
 
 // 끝 시각 근처라도 0, 99 가 아닌 종료 코드(예: 107 스크립트 오류)는 정상 종료가 아니다

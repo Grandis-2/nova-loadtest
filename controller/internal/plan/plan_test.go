@@ -32,6 +32,8 @@ func input(scenario string) Input {
 	in := Input{TestID: testID, Scenario: scenario, ProductID: product, Now: now}
 	if scenario == "spike" {
 		in.PrepProductID = prepPID
+	}
+	if scenario == "spike" || scenario == "rush" {
 		in.OpenAt = "2026-10-20T00:30:00Z" // 지금부터 30분 뒤(최대 1시간)
 	}
 	return in
@@ -60,6 +62,9 @@ func mustReject(t *testing.T, c *config.Config, in Input, want string) {
 func TestDefaults(t *testing.T) {
 	c := cfg(t)
 	for _, s := range config.ScenarioOrder {
+		if s == "rush" {
+			continue // 흐름이 정해져 있다(TestRush)
+		}
 		t.Run(s, func(t *testing.T) {
 			p := mustPlan(t, c, input(s))
 			if p.Tasks < 1 || len(p.Scenarios) == 0 || len(p.Windows) == 0 || len(p.FlowRates) != 5 {
@@ -390,5 +395,67 @@ func TestSpikePoolSplitPerTask(t *testing.T) {
 		if need := (iters(observe) + n - 1) / n; size-to < need {
 			t.Fatalf("태스크 %d: 관찰 구간 %d명 < 반복 %d회", i, size-to, need)
 		}
+	}
+}
+
+// rush: 몰린 회원(풀 A)만 쓰고 준비 구간이 없다. 결제는 관찰 시간 안에 끝나야 한다
+func TestRush(t *testing.T) {
+	c := cfg(t)
+	p := mustPlan(t, c, input("rush"))
+	if strings.Join(p.Flows, ",") != "catalog,entry,order" || p.PrepProductID != "" || p.MainStart != 0 {
+		t.Fatalf("흐름 %v, 준비 상품 %q, 본 시험 시작 %d", p.Flows, p.PrepProductID, p.MainStart)
+	}
+	if m := p.Members; m == nil || m.A.Count != 5000+20 || m.B.Count != 0 || m.C.Count != 0 {
+		t.Fatalf("풀 A만 몰림 5,000명 + 여유 20명이어야 한다: %+v", p.Members)
+	}
+	if p.Rush == nil || p.Rush.PayRatio != 0.5 || p.Rush.NotifyIntervalSeconds != 10 || p.Rush.NotifyTimeoutSeconds != 480 {
+		t.Fatalf("rush 값: %+v", p.Rush)
+	}
+	graceful := int(c.Runner.EntryGracefulStop.D().Seconds())
+	if p.Estimates.TotalSeconds != p.MainEnd+graceful {
+		t.Fatalf("예상 시간 %d초(기대 %d초)", p.Estimates.TotalSeconds, p.MainEnd+graceful)
+	}
+	for _, s := range p.Scenarios {
+		if s.Flow != "rush" {
+			continue
+		}
+		start, _ := time.ParseDuration(s.StartTime)
+		d, _ := time.ParseDuration(s.Duration)
+		g, _ := time.ParseDuration(s.GracefulStop)
+		// 몰린 회원은 관찰 시간 끝까지 기다릴 수 있고, 예상 시간을 넘지 않는다
+		if end := int((start + d + g).Seconds()); end != p.Estimates.TotalSeconds || s.MaxVUs < 5000 {
+			t.Fatalf("rush 시나리오가 %d초에 끝난다(예상 %d초), maxVUs %d", end, p.Estimates.TotalSeconds, s.MaxVUs)
+		}
+		return
+	}
+	t.Fatal("rush 시나리오가 없다")
+}
+
+func TestRushRejects(t *testing.T) {
+	c := cfg(t)
+	with := func(f func(*Input)) Input { in := input("rush"); f(&in); return in }
+	for _, tc := range []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{"open_at 없음", with(func(in *Input) { in.OpenAt = "" }), "open_at이 필요"},
+		{"flows", with(func(in *Input) { in.Flows = []string{"entry"} }), "flows를 쓰지 않는다"},
+		{"준비 상품", with(func(in *Input) { in.PrepProductID = prepPID }), "prep_product_id를 쓰지 않는다"},
+		{"알림 상한보다 짧은 관찰", with(func(in *Input) { in.Duration = "8m" }), "알림 대기 상한"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { mustReject(t, c, tc.in, tc.want) })
+	}
+}
+
+// 바로 결제하는 회원이 없으면 주문 흐름이 없고, 판정에서 주문 요청을 찾지 않는다
+func TestRushWithoutPayment(t *testing.T) {
+	c := cfg(t)
+	sc := c.Scenarios["rush"]
+	sc.Rush.PayRatio = 0
+	c.Scenarios["rush"] = sc
+	p := mustPlan(t, c, input("rush"))
+	if strings.Join(p.Flows, ",") != "catalog,entry" {
+		t.Fatalf("흐름 %v", p.Flows)
 	}
 }

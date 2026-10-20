@@ -21,7 +21,7 @@ func main() {
 	var in plan.Input
 	var flows, now, jsonOut, summaryOut string
 	flag.StringVar(&in.TestID, "test-id", "", "시험 ID(lt-<yyyymmddThhmm>-<번호>)")
-	flag.StringVar(&in.Scenario, "scenario", "smoke", "smoke, load, spike, stress, soak")
+	flag.StringVar(&in.Scenario, "scenario", "smoke", "smoke, load, spike, rush, stress, soak")
 	flag.StringVar(&in.ProductID, "product-id", "", "진입과 접수에 쓰는 시험 상품 ID")
 	flag.StringVar(&in.PrepProductID, "prep-product-id", "", "준비 구간 시험 상품 ID(기본 product-id)")
 	flag.StringVar(&in.OpenAt, "open-at", "", "회차가 열리는 시각(RFC 3339, UTC)")

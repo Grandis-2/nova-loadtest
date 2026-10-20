@@ -24,7 +24,7 @@ nova-loadtest/
 ├── k6/
 │   ├── Dockerfile               linux/amd64. grafana/k6:2.3.0 의 k6 실행 파일 + k6-runner (distroless)
 │   ├── main.js                  PLAN_JSON 을 읽어 시나리오(흐름별 실행기)를 만든다. setup 에서 접수할 옵션을 고른다
-│   ├── test/e2e.sh              k6 이미지를 fake-api 와 moto 에 붙여 끝까지 돌린다(ok, error, sigterm). CI k6-safety 가 쓴다
+│   ├── test/e2e.sh              k6 이미지를 fake-api 와 moto 에 붙여 끝까지 돌린다(ok, rush, error, sigterm, tokenfail). CI k6-safety 가 쓴다
 │   └── lib/
 │       ├── config.js            환경 변수 읽기와 검사
 │       ├── http.js              요청 함수(경로 템플릿 필수), 공통 헤더, 응답 봉투(ApiResponse) 해석, error_code 카운터
@@ -36,6 +36,7 @@ nova-loadtest/
 │           ├── preorders.js     내 예약 조회
 │           ├── cancel.js        예약 취소(풀 C)
 │           ├── order.js         주문 생성 → 결제 시도
+│           ├── rush.js          rush: 상품 상세 → 진입·접수 → 등록 알림 기다리기 → 주문 → 결제 시도(풀 A)
 │           ├── catalog.js       상품 조회
 │           └── skip.js          요청 없이 넘어간 반복(skipped) 카운터
 ├── controller/                  컨트롤러(Go)
@@ -92,7 +93,7 @@ nova-loadtest/
 | 항목 | 내용 |
 |---|---|
 | `flows` | 흐름별 평시 비율(상품 80, 예약 조회 10, 진입 5, 결제 시도 5, 취소 1), 회원 풀, 흐름당 요청 수(계획의 예상 요청 수 계산용), 진입 상한(입장 속도 150/초의 80% = 120/초), WAF 예외 없는 시나리오의 IP당 5분 요청 상한(2,400) |
-| `scenarios.<이름>` | 모양(constant, ramping, spike, step), 기본 `peak_rps`(흐름 시작 수), `duration`, `ramp_up`, 상한(`max_rps`, `max_duration`, `max_vus`), WAF 예외 필요 여부, 풀 B 크기(smoke 50, 그 밖 1,000). spike는 몰림(500/초 × 10초), 배경 비율, 관찰 시간(10분). stress는 단계 배수(1·2·4·6·8)와 단계 시간(5분) |
+| `scenarios.<이름>` | 모양(constant, ramping, spike, rush, step), 기본 `peak_rps`(흐름 시작 수), `duration`, `ramp_up`, 상한(`max_rps`, `max_duration`, `max_vus`), WAF 예외 필요 여부, 풀 B 크기(smoke 50, 그 밖 1,000). spike는 몰림(500/초 × 10초), 배경 비율, 관찰 시간(10분). stress는 단계 배수(1·2·4·6·8)와 단계 시간(5분). rush는 spike와 같은 몰림에 결제 비율(50%), 알림 확인 간격(10초)과 대기 상한(8분)(`rush`), 배경은 상품 조회만 |
 | `runner` | 태스크당 초당 요청(처음 1,000), VU당 메모리(5MB), 태스크 크기(4 vCPU, 8GB), 여유 30%, 최대 태스크 수(`max_tasks`, Fargate vCPU 할당량에서 운영 사용분을 뺀 값) |
 | `members` | 시험 회원 ID 범위(시작 번호, 개수), 풀 B 크기(예: 1,000명), 준비 구간 속도(초당 100건 이하), 등록 대기 시간(2분) |
 | `cleanup` | 정리 전에 비어야 하는 SQS 큐 이름(등록, 취소, `preorder-events`, `order-events`), 최대 대기 30분. 이름만 두고 계정 ID는 넣지 않는다 |

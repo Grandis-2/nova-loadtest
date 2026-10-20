@@ -83,6 +83,7 @@ const (
 	ShapeSpike    Shape = "spike"
 	ShapeStep     Shape = "step"
 	ShapeRush     Shape = "rush"
+	ShapeQueue    Shape = "queue"
 )
 
 // Rush는 rush 시나리오에서 몰린 회원이 접수 뒤에 이어 가는 값이다
@@ -108,6 +109,10 @@ type Scenario struct {
 	WAFExempt       bool               `yaml:"waf_exempt"`
 	PoolB           int                `yaml:"pool_b"`
 	Rush            Rush               `yaml:"rush"`
+	// queue: 인원(입력 members)의 기본값과 상한, duration 을 비웠을 때 처리 기한에 더하는 여유
+	Members        int      `yaml:"members"`
+	MaxMembers     int      `yaml:"max_members"`
+	DeadlineMargin Duration `yaml:"deadline_margin"`
 }
 
 type Runner struct {
@@ -167,6 +172,8 @@ type Metrics struct {
 	Duration      string `yaml:"duration"`
 	Reqs          string `yaml:"reqs"`
 	VUs           string `yaml:"vus"`
+	Outcomes      string `yaml:"outcomes"`
+	Dropped       string `yaml:"dropped"`
 	LE500         string `yaml:"le_500"`
 }
 
@@ -190,7 +197,7 @@ type Config struct {
 var FlowOrder = []string{"catalog", "preorders", "entry", "order", "cancel"}
 
 // ScenarioOrder는 시나리오 이름의 순서다.
-var ScenarioOrder = []string{"smoke", "load", "spike", "rush", "stress", "soak"}
+var ScenarioOrder = []string{"smoke", "load", "spike", "rush", "queue", "stress", "soak"}
 
 // Default는 실행 파일에 들어 있는 scenarios.yml이다.
 func Default() (*Config, error) { return Parse(embedded) }
@@ -288,9 +295,9 @@ func (c *Config) Validate() error {
 			bad("scenarios.%s가 없다", name)
 			continue
 		}
-		// rush는 준비 구간이 없어 pool_b를 쓰지 않는다
+		// rush, queue는 준비 구간이 없어 pool_b를 쓰지 않는다
 		if !pos(s.PeakRPS, s.MaxRPS) || s.MaxRPS < s.PeakRPS || s.MaxVUs <= 0 || s.MaxDuration <= 0 ||
-			(s.PoolB <= 0 && s.Shape != ShapeRush) {
+			(s.PoolB <= 0 && s.Shape != ShapeRush && s.Shape != ShapeQueue) {
 			bad("scenarios.%s: peak_rps, max_rps(≥ peak_rps), max_vus, max_duration, pool_b를 확인한다", name)
 		}
 		switch s.Shape {
@@ -324,6 +331,14 @@ func (c *Config) Validate() error {
 				if !nonneg(v) {
 					bad("scenarios.%s.background.%s: 0 이상이어야 한다", name, f)
 				}
+			}
+		case ShapeQueue:
+			// duration은 처리 기한이라 기본값을 인원으로 계산한다. 준비 구간과 배경이 없다
+			// 풀 A에는 태스크 상한만큼 여유를 더 둔다(plan.poolSlack)
+			if s.Members <= 0 || s.MaxMembers < s.Members || int64(s.MaxMembers+c.Runner.MaxTasks) > c.Members.Count || s.DeadlineMargin <= 0 ||
+				s.Duration != 0 || s.PoolB != 0 || len(s.Background) > 0 {
+				bad("scenarios.%s: members는 0보다 크고 max_members(+ runner.max_tasks ≤ members.count) 이하, deadline_margin은 0보다 커야 한다. "+
+					"duration, pool_b, background는 쓰지 않는다", name)
 			}
 		case ShapeStep:
 			if len(s.Steps) == 0 || s.StepDuration <= Duration(StepRampSeconds*time.Second) {
@@ -360,6 +375,11 @@ func (c *Config) Validate() error {
 	}
 	if !pos(c.SLO.P95MS, c.SLO.AbortErrorRate, c.SLO.Abort5xxRate) || !nonneg(c.SLO.Max5xxRate) || c.SLO.AbortAfter <= 0 {
 		bad("slo 값을 확인한다")
+	}
+	// 이름이 비면 쿼리가 시험의 모든 시계열에 걸린다
+	if mt := c.Metrics; mt.Job == "" || mt.InstanceLabel == "" || mt.Duration == "" || mt.Reqs == "" || mt.VUs == "" || mt.LE500 == "" || mt.Outcomes == "" ||
+		mt.Dropped == "" {
+		bad("metrics의 이름은 비어 있을 수 없다")
 	}
 	return errors.Join(errs...)
 }

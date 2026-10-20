@@ -47,6 +47,7 @@ type taskOut struct {
 	StartedBy         string       `json:"startedBy,omitempty"`
 	TaskDefinitionArn string       `json:"taskDefinitionArn,omitempty"`
 	StartedAt         *float64     `json:"startedAt,omitempty"`
+	StoppedAt         *float64     `json:"stoppedAt,omitempty"`
 	StoppedReason     string       `json:"stoppedReason,omitempty"`
 	Containers        []contOut    `json:"containers,omitempty"`
 	Attachments       []attachment `json:"attachments,omitempty"`
@@ -197,6 +198,10 @@ func tasksOut(ts []types.Task) []taskOut {
 		if t.StartedAt != nil {
 			v := float64(t.StartedAt.UnixMilli()) / 1000
 			o.StartedAt = &v
+		}
+		if t.StoppedAt != nil {
+			v := float64(t.StoppedAt.UnixMilli()) / 1000
+			o.StoppedAt = &v
 		}
 		for _, c := range t.Containers {
 			o.Containers = append(o.Containers, contOut{Name: aws.ToString(c.Name), ExitCode: c.ExitCode, ImageDigest: aws.ToString(c.ImageDigest)})

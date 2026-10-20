@@ -14,7 +14,7 @@ nova-loadtest/
 │   └── workflows/
 │       ├── ci.yml               PR, main push: actionlint, 워크플로 규칙, 린트, 단위 테스트, k6 inspect, 이미지 빌드(푸시 없음), k6-safety
 │       ├── build.yml            main push: 이미지 3개 → ECR (커밋 해시, latest)
-│       ├── loadtest-<시나리오>.yml  수동: 시나리오마다 쓰는 입력만 받아 _loadtest.yml 을 부른다(smoke, load, spike, rush, stress, soak)
+│       ├── loadtest-<시나리오>.yml  수동: 시나리오마다 쓰는 입력만 받아 _loadtest.yml 을 부른다(smoke, load, spike, rush, queue, stress, soak)
 │       ├── _loadtest.yml        공통 실행(workflow_call): 입력 확인 → 승인 → 컨트롤러 → 결과 → 뒷정리
 │       ├── stop.yml             수동: 시험 ID 의 k6 태스크 중지
 │       └── cleanup.yml          수동(승인): 회차 마감 뒤 시험 ID 의 시험 데이터 정리
@@ -25,7 +25,7 @@ nova-loadtest/
 ├── k6/
 │   ├── Dockerfile               linux/amd64. grafana/k6:2.3.0 의 k6 실행 파일 + k6-runner (distroless)
 │   ├── main.js                  PLAN_JSON 을 읽어 시나리오(흐름별 실행기)를 만든다. setup 에서 접수할 옵션을 고른다
-│   ├── test/e2e.sh              k6 이미지를 fake-api 와 moto 에 붙여 끝까지 돌린다(ok, rush, error, sigterm, tokenfail). CI k6-safety 가 쓴다
+│   ├── test/e2e.sh              k6 이미지를 fake-api 와 moto 에 붙여 끝까지 돌린다(ok, rush, queue, error, sigterm, tokenfail). CI k6-safety 가 쓴다
 │   └── lib/
 │       ├── config.js            환경 변수 읽기와 검사
 │       ├── http.js              요청 함수(경로 템플릿 필수), 공통 헤더, 응답 봉투(ApiResponse) 해석, error_code 카운터
@@ -94,12 +94,12 @@ nova-loadtest/
 | 항목 | 내용 |
 |---|---|
 | `flows` | 흐름별 평시 비율(상품 80, 예약 조회 10, 진입 5, 결제 시도 5, 취소 1), 회원 풀, 흐름당 요청 수(계획의 예상 요청 수 계산용. 상품 조회는 `catalog_paths`의 화면 이동 비율로 계산한 값과 맞춘다), 진입 상한(입장 속도 150/초의 80% = 120/초), WAF 예외 없는 시나리오의 IP당 5분 요청 상한(2,400) |
-| `scenarios.<이름>` | 모양(constant, ramping, spike, rush, step), 기본 `peak_rps`(흐름 시작 수), `duration`, `ramp_up`, 상한(`max_rps`, `max_duration`, `max_vus`), WAF 예외 필요 여부, 풀 B 크기(smoke 50, 그 밖 1,000). spike는 몰림(500/초 × 10초), 배경 비율, 관찰 시간(10분). stress는 단계 배수(1·2·4·6·8)와 단계 시간(5분). rush는 spike와 같은 몰림에 결제 비율(50%), 알림 확인 간격(10초)과 대기 상한(8분)(`rush`), 배경은 상품 조회만 |
+| `scenarios.<이름>` | 모양(constant, ramping, spike, rush, queue, step), 기본 `peak_rps`(흐름 시작 수), `duration`, `ramp_up`, 상한(`max_rps`, `max_duration`, `max_vus`), WAF 예외 필요 여부, 풀 B 크기(smoke 50, 그 밖 1,000). spike는 몰림(500/초 × 10초), 배경 비율, 관찰 시간(10분). stress는 단계 배수(1·2·4·6·8)와 단계 시간(5분). rush는 spike와 같은 몰림에 결제 비율(50%), 알림 확인 간격(10초)과 대기 상한(8분)(`rush`), 배경은 상품 조회만. queue는 인원 기본값(5,000)과 상한(99,980), 처리 기한 여유(3분)이고 `duration`과 풀 B가 없다 |
 | `runner` | 태스크당 초당 요청(처음 1,000), VU당 메모리(5MB), 태스크 크기(4 vCPU, 8GB), 여유 30%, 최대 태스크 수(`max_tasks`, Fargate vCPU 할당량에서 운영 사용분을 뺀 값) |
 | `members` | 시험 회원 ID 범위(시작 번호, 개수), 풀 B 크기(예: 1,000명), 준비 구간 속도(초당 100건 이하), 등록 대기 시간(2분) |
 | `cleanup` | 정리 전에 비어야 하는 SQS 큐 이름(등록, 취소, `preorder-events`, `order-events`), 최대 대기 30분. 이름만 두고 계정 ID는 넣지 않는다 |
 | `slo` | 판정 기준(p95 0.5초, 5xx 0.1%), 중단 기준 기본값(오류율 5%, 5xx 1%, 둘 다 1분 넘게) |
-| `metrics` | Mimir의 지표 이름(`k6_http_reqs_total` 등), `job`, 태스크 라벨, `le` 값. C-2에서 확정한 값으로 고친다 |
+| `metrics` | Mimir의 지표 이름(`k6_http_reqs_total`, queue 처리 인원의 `k6_entry_outcome_total` 등), `job`, 태스크 라벨, `le` 값. C-2에서 확정한 값으로 고친다 |
 
 ### 2.2 k6 (`k6/`)
 
@@ -189,6 +189,7 @@ nova-loadtest/
 - 오류율(중단 기준): `sum(rate(<reqs>{test_id="X",expected_response="false"}[1m])) / sum(rate(<reqs>{test_id="X"}[1m]))`. k6의 `http_req_failed`와 같은 정의다
 - 실제 부하: `sum(rate(<reqs>{test_id="X"}[1m]))`. 계획의 95% 미만이면 "부하 부족"으로 표시한다
 - 밀린 반복: `dropped_iterations`가 0보다 크면 VU가 모자란 것이다
+- queue 처리 인원: `sum by (outcome) (max_over_time(<outcomes>{test_id="X"}[시험 전체]))`에서 `registered` + `accepted` ≥ 인원. `<outcomes>` = `k6_entry_outcome_total`. 누적값의 최댓값을 더하는 까닭은 시계열이 처음 생긴 표본을 `increase`가 세지 않기 때문이다. `sum(max_over_time(k6_dropped_iterations_total{...}[시험 전체]))`가 0보다 크면 판정 불가다
 - 지표 끊김: `time() - max by (instance) (timestamp(<vus>{test_id="X"}))`가 60을 넘거나, 계획한 태스크 수보다 적게 나오면 끊긴 것이다. 요청 지표는 흐름이 쉬는 구간(등록 대기)에 멈출 수 있어 `vus`를 쓴다
 - 태스크 라벨은 `instance`로 본다. `job`이 `loadtest/k6`로 나온다는 것은 Mimir가 리소스 속성을 OTLP 규칙대로 바꾼다는 뜻이고, 같은 규칙에서 `service.instance.id`는 `instance`가 된다. C-2에서 확인한다
 
@@ -335,7 +336,7 @@ load → spike → stress, soak 순서로 올린다. 매번 담당자 승인을 
 - Mimir에 들어간 k6 지표 이름(단위 접미사)과 시험 하나의 시계열 수
 - `OTEL_RESOURCE_ATTRIBUTES`가 k6 리소스 속성에 실제로 들어가는지. k6 문서는 표준 `OTEL_*` 변수를 쓸 수 있다고만 하고 이 변수를 따로 적지 않았다. 안 들어가면 `options.tags`에 `instance`를 넣고 쿼리의 라벨을 바꾼다
 - k6가 컨트롤러가 넣은 수집 주소와 작업 정의의 고정값(`http/protobuf`, 평문)으로 게이트웨이에 보내는지. k6 로그에 내보내기 오류가 없는지
-- 실제 지표 이름과 라벨: `k6_http_reqs_total`, `k6_http_req_duration_milliseconds_bucket`(`le="500"`의 형식), `k6_vus`, `job="loadtest/k6"`, 태스크 라벨 `instance`. `scenarios.yml`의 지표 이름과 fake-mimir 각본을 이 값으로 맞춘다
+- 실제 지표 이름과 라벨: `k6_http_reqs_total`, `k6_http_req_duration_milliseconds_bucket`(`le="500"`의 형식), `k6_vus`, `k6_entry_outcome_total`(라벨 `outcome`), `k6_dropped_iterations_total`, `job="loadtest/k6"`, 태스크 라벨 `instance`. `scenarios.yml`의 지표 이름과 fake-mimir 각본을 이 값으로 맞춘다
 - `http_req_failed` 같은 Rate 지표가 `condition` 속성으로 나오는지(k6 문서에 형식이 바뀌었다고 되어 있다). 오류율은 `http_reqs`의 `expected_response`로 구하므로 판정에는 영향이 없지만 대시보드 쿼리에 쓴다
 - `k6-runner`가 운영 S3에서 토큰을 받고 `k6-<i>.json`을 올리는지. `StopTask`로 멈췄을 때도 120초 안에 올라가는지
 - CloudFront 로그에 User-Agent `nova-loadtest/<시험 ID>`가 그대로 남는지

@@ -93,6 +93,13 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 				out = append(out, sample{Metric: map[string]string{"scenario": k.Name}, Value: [2]any{ts, fmtFloat(float64(rng))}})
 			}
 		}
+	case strings.Contains(q, "sum by (outcome)"):
+		// queue 는 인원이 모두 등록까지 간다
+		if p.Queue != nil {
+			out = append(out, sample{Metric: map[string]string{"outcome": "registered"}, Value: [2]any{ts, fmtFloat(float64(p.Queue.Members))}})
+		}
+	case strings.Contains(q, "sum(max_over_time("):
+		out = nil // 시작하지 못한 반복이 없으면 시계열이 없다
 	case strings.Contains(q, "sum by (name)"):
 		window := -1
 		for wi, w := range p.Windows {

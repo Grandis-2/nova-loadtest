@@ -125,6 +125,7 @@ type State struct {
 	ExitCode      *int32 // 컨테이너가 끝났을 때만 있다
 	ImageDigest   string
 	StartedAt     *time.Time
+	StoppedAt     *time.Time // 멈췄을 때만 있다
 	StoppedReason string
 	PrivateIP     string
 	TaskDef       string
@@ -141,7 +142,7 @@ func (r *Runner) Describe(ctx context.Context, arns []string, container string) 
 		}
 		for _, t := range out.Tasks {
 			s := State{
-				ARN: aws.ToString(t.TaskArn), LastStatus: aws.ToString(t.LastStatus), StartedAt: t.StartedAt,
+				ARN: aws.ToString(t.TaskArn), LastStatus: aws.ToString(t.LastStatus), StartedAt: t.StartedAt, StoppedAt: t.StoppedAt,
 				StoppedReason: aws.ToString(t.StoppedReason), TaskDef: aws.ToString(t.TaskDefinitionArn),
 				PrivateIP: privateIP(t), StartedBy: aws.ToString(t.StartedBy),
 			}

@@ -119,7 +119,7 @@ jobs:
           # open_at 은 지금부터 1시간 안이어야 한다(max_open_at_lead). spike 와 rush 만 쓴다
           open_at=$(date -u -d '+30 minutes' +%Y-%m-%dT%H:%M:%SZ)
           # spike-open 은 이미 열린 상품의 spike 다(open_at, prep_product_id 없이)
-          for s in smoke load spike spike-open rush stress soak; do
+          for s in smoke load spike spike-open rush queue stress soak; do
             extra=""
             scenario=$s
             [ "$s" = spike ] && extra="-prep-product-id $q -open-at $open_at"
@@ -141,7 +141,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [ok, rush, error, sigterm, tokenfail]
+        mode: [ok, rush, queue, error, sigterm, tokenfail]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

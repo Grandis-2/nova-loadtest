@@ -2,7 +2,9 @@ package plan
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,8 +64,8 @@ func mustReject(t *testing.T, c *config.Config, in Input, want string) {
 func TestDefaults(t *testing.T) {
 	c := cfg(t)
 	for _, s := range config.ScenarioOrder {
-		if s == "rush" {
-			continue // 흐름이 정해져 있다(TestRush)
+		if s == "rush" || s == "queue" {
+			continue // 흐름이 정해져 있다(TestRush, TestQueue)
 		}
 		t.Run(s, func(t *testing.T) {
 			p := mustPlan(t, c, input(s))
@@ -446,6 +448,126 @@ func TestRushRejects(t *testing.T) {
 		{"알림 상한보다 짧은 관찰", with(func(in *Input) { in.Duration = "8m" }), "알림 대기 상한"},
 	} {
 		t.Run(tc.name, func(t *testing.T) { mustReject(t, c, tc.in, tc.want) })
+	}
+}
+
+// queue: 인원이 한 번씩 진입하고, 처리 기한까지 기다린다. 값은 docs/design.md "queue" 와 같다
+func TestQueue(t *testing.T) {
+	c := cfg(t)
+	for _, tc := range []struct {
+		members      int
+		peak         float64
+		arrival, min int
+		vus, tasks   int
+	}{
+		// 줄 (500-150)×10 = 3,500명 + 입장 뒤 150×5 = 750명
+		{5000, 0, 10, 39, 4250, 6},
+		{10000, 0, 20, 72, 7750, 9},
+		// 99,980명은 165/초까지다. 줄 약 9,000명
+		{99980, 165, 606, 672, 9830, 8},
+		// 입장 속도보다 느리면 줄이 없다. 동시 인원은 인원을 넘지 않는다
+		{100, 50, 2, 7, 100, 1},
+		// 도착 시간은 올림한다. 반올림하면 1초에 2,500명(max_rps 2,000 초과)이 들어간다. 실제 진입은 초당 1,250
+		{2500, 2000, 2, 22, 2500, 9},
+	} {
+		in := input("queue")
+		in.Members, in.PeakRPS = tc.members, tc.peak
+		p := mustPlan(t, c, in)
+		q := p.Queue
+		if strings.Join(p.Flows, ",") != "entry" || p.PrepProductID != "" || p.MainStart != 0 || len(p.Scenarios) != 1 {
+			t.Fatalf("%d명: 흐름 %v, 준비 상품 %q, 본 시험 시작 %d, 시나리오 %d개", tc.members, p.Flows, p.PrepProductID, p.MainStart, len(p.Scenarios))
+		}
+		deadline := tc.min + 180 // deadline_margin 3분
+		if q == nil || q.Members != tc.members || q.ArrivalSeconds != tc.arrival || q.MinSeconds != tc.min || q.DeadlineSeconds != deadline {
+			t.Fatalf("%d명: queue 값 %+v", tc.members, q)
+		}
+		s := p.Scenarios[0]
+		// 도착률을 "도착 시간에 인원만큼"으로 적어 k6의 반복 수가 인원과 같다
+		// 진입은 open_at + 1초에 시작한다(시계 어긋남. 열리기 전에 들어가면 SALE_NOT_OPEN 으로 실패한다)
+		if s.Name != "queue" || s.Flow != "entry" || s.StartTime != "1s" || s.Rate != tc.members || s.TimeUnit != secs(tc.arrival) || s.Duration != secs(tc.arrival) ||
+			s.GracefulStop != secs(deadline-tc.arrival) || s.MaxVUs != tc.vus || s.PreAllocatedVUs != tc.vus {
+			t.Fatalf("%d명: k6 시나리오 %+v", tc.members, s)
+		}
+		if p.Tasks != tc.tasks || p.MainEnd != 1+deadline || p.Estimates.TotalSeconds != 1+deadline {
+			t.Fatalf("%d명: 태스크 %d, 본 시험 끝 %d, 예상 시간 %d", tc.members, p.Tasks, p.MainEnd, p.Estimates.TotalSeconds)
+		}
+		if p.Members.A.Count != int64(tc.members)+20 || len(p.Windows) != 1 || p.Windows[0] != (Window{"queue", 0, 1 + tc.min}) {
+			t.Fatalf("%d명: 풀 A %d, 판정 구간 %v", tc.members, p.Members.A.Count, p.Windows)
+		}
+	}
+}
+
+func TestQueueRejects(t *testing.T) {
+	c := cfg(t)
+	with := func(f func(*Input)) Input { in := input("queue"); f(&in); return in }
+	for _, tc := range []struct {
+		name string
+		in   Input
+		want string
+	}{
+		// 줄이 7만 명이 된다. 상한 안인 가장 큰 진입 수를 알려 준다
+		{"동시 인원", with(func(in *Input) { in.Members = 99980 }), "99980명이면 peak_rps를 165 이하로 둔다"},
+		{"인원 상한", with(func(in *Input) { in.Members = 99981 }), "1 이상 99980 이하"},
+		{"짧은 기한", with(func(in *Input) { in.Duration = "38s" }), "최소 처리 시간 39s 이상이어야 한다"},
+		{"flows", with(func(in *Input) { in.Flows = []string{"entry"} }), "queue에는 flows를 쓰지 않는다"},
+		{"준비 상품", with(func(in *Input) { in.PrepProductID = prepPID }), "queue에는 prep_product_id를 쓰지 않는다"},
+		{"상품 없음", with(func(in *Input) { in.ProductID = "" }), "product_id가 필요하다"},
+		{"다른 시나리오의 인원", func() Input { in := input("load"); in.Members = 100; return in }(), "load에는 members를 쓰지 않는다"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { mustReject(t, c, tc.in, tc.want) })
+	}
+	// 기한은 최소 처리 시간과 같아도 된다
+	p := mustPlan(t, c, with(func(in *Input) { in.Duration = "39s" }))
+	if p.Queue.DeadlineSeconds != 39 || p.Scenarios[0].GracefulStop != "29s" {
+		t.Fatalf("기한 %+v", p.Queue)
+	}
+}
+
+// 실제 진입 수(인원 ÷ 도착 시간)는 입력한 peak_rps를 넘지 않는다
+func TestQueueRateWithinPeak(t *testing.T) {
+	c := cfg(t)
+	for _, peak := range []float64{1, 7, 150, 499, 500, 1999, 2000} {
+		for n := 1; n <= 9000; n += 97 {
+			in := input("queue")
+			in.Members, in.PeakRPS = n, peak
+			p, err := New(c, in)
+			if err != nil {
+				continue // 시간이나 VU 상한으로 거절한 경우
+			}
+			if s := p.Scenarios[0]; float64(n)/float64(p.Queue.ArrivalSeconds) > peak || s.Rate != n {
+				t.Fatalf("%d명, peak_rps %v: %d초에 %d번(초당 %.1f)", n, peak, p.Queue.ArrivalSeconds, s.Rate, float64(n)/float64(p.Queue.ArrivalSeconds))
+			}
+		}
+	}
+}
+
+// VU 상한을 넘을 때 안내한 peak_rps를 넣으면 상한 안에 든다. 도착 시간을 반올림해 실제 진입 수가 안내 값보다 커지는
+// 경우가 있었다(인원 10,037명에 1,913을 안내했는데 다시 넘었다)
+func TestQueueVUHint(t *testing.T) {
+	c := cfg(t)
+	re := regexp.MustCompile(`peak_rps를 (\d+) 이하`)
+	checked := 0
+	for n := 10001; n <= 99980; n += 37 {
+		in := input("queue")
+		in.Members, in.PeakRPS = n, 2000
+		_, err := New(c, in)
+		m := re.FindStringSubmatch(fmt.Sprint(err))
+		if m == nil {
+			continue
+		}
+		hint, _ := strconv.ParseFloat(m[1], 64)
+		checked++
+		// 진입 수를 낮추면 도착 시간이 줄지 않아 동시 인원도 늘지 않는다. 그래서 "이하"로 안내한다
+		// (반올림 때문에 안내 값보다 조금 큰 값이 상한 안일 수는 있다)
+		for _, r := range []float64{hint, hint - 1, math.Floor(hint / 2)} {
+			in.PeakRPS = r
+			if _, err := New(c, in); err != nil && strings.Contains(err.Error(), "최대 VU") {
+				t.Fatalf("%d명: 안내 %v 이하인 %v를 넣어도 상한을 넘는다: %v", n, hint, r, err)
+			}
+		}
+	}
+	if checked < 2000 {
+		t.Fatalf("안내를 %d건만 확인했다", checked)
 	}
 }
 

@@ -93,12 +93,12 @@ unset NOVA_ADMIN_TOKEN
 
 Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(브랜치 main). 시나리오마다 워크플로가 따로 있고, 그 시나리오가 쓰는 입력만 보인다. 실행은 모두 공통 워크플로 `_loadtest.yml`이 한다. 입력은 [설정과 비밀 값](configuration.md#워크플로가-러너-명령cmdgha에-넘기는-값)에도 있다.
 
-| 워크플로 | 보이는 입력 |
+| 워크플로 | 보이는 입력(필수는 입력 화면에서도 비울 수 없다) |
 |---|---|
 | `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `abort_error_rate` |
 | `loadtest-load.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-spike.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-rush.yml` | `product_id`, `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
+| `loadtest-spike.yml` | `product_id`(필수), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-rush.yml` | `product_id`(필수), `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
 | `loadtest-stress.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-soak.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 

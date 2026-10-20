@@ -133,6 +133,13 @@ flowchart LR
 
 발급기는 회원 번호가 `config/scenarios.yml`의 시험 회원 범위 안인지 다시 확인한다. 이 범위는 빌드할 때 실행 파일에 들어가므로 실행 중에 바꿀 수 없다.
 
+### 시험 상품을 만들 때 담당자가 넣는 값(`cmd/testproduct`)
+
+| 환경 변수 | 내용 |
+|---|---|
+| `NOVA_ADMIN_TOKEN` | 관리자 화면에 로그인한 세션의 토큰. 명령을 돌릴 때만 셸에 두고 끝나면 지운다. 저장소, 워크플로, AWS에 두지 않는다 |
+| `BASE_URL` | API 주소. 비우면 `https://api.grandis-nova.link` |
+
 ## 이 저장소의 설정
 
 `config/scenarios.yml` 하나에 모두 있다. 흐름 비율, 시나리오 기본값과 상한, 실행기 크기, 시험 회원 범위, 시계열 상한, SLO와 중단 기준, 정리 전에 볼 큐(`preorder-register`, `preorder-cancel`, `preorder-events`, `order-events`), Mimir 지표 이름이다. 각 항목의 뜻은 [구현 계획 2.1](implementation-plan.md#21-configscenariosyml)에 있다.

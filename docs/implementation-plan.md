@@ -46,6 +46,7 @@ nova-loadtest/
 │   ├── cmd/fake-api/            로컬·CI 시험용. be 공개 API 모양을 흉내 내고, User-Agent·헤더·토큰·멱등 키 규칙 위반을 센다
 │   ├── cmd/fake-cluster/        로컬 시험용. 가짜 ECS(RunTask/ListTasks/DescribeTasks/StopTask)와 가짜 Mimir(PromQL)를 한 프로세스로 띄운다
 │   ├── cmd/scenarios/           로컬 3단계 각본 실행기: 각본 바꾸기 → dispatch → 개입(중지, 취소, 컨트롤러 종료) → 결과 확인
+│   ├── cmd/testproduct/         담당자가 자기 관리자 세션으로 시험 상품(사전예약, 회차, 배송 차수)을 만든다. 워크플로는 쓰지 않는다
 │   ├── Dockerfile               컨트롤러 이미지(distroless)
 │   └── internal/
 │       ├── plan/                입력 + scenarios.yml → 계획(도착률, 대수, 회원, VU, 시간)
@@ -58,7 +59,8 @@ nova-loadtest/
 │       ├── gha/                 cmd/gha 의 로직: 실행 위치 확인, 입력, 값 가리기, 사전 점검, OIDC 세션 갱신, 결과 정리
 │       ├── clock/               시계(테스트는 가짜 시계로 시간을 바로 흘린다)
 │       ├── fakeecs/             각본대로 도는 ECS. 단위 테스트와 fake-cluster 가 같이 쓴다
-│       └── fakelocal/           fake-cluster 의 ECS JSON API, Mimir 응답, 각본 목록, moto 준비
+│       ├── fakelocal/           fake-cluster 의 ECS JSON API, Mimir 응답, 각본 목록, moto 준비
+│       └── testproduct/         cmd/testproduct 의 로직: 등록 본문, 등록, 준비 기다리기
 ├── token-minter/                토큰 발급기(Go, distroless)
 │   ├── Dockerfile
 │   ├── cmd/token-minter/        환경 변수를 읽어 토큰 파일을 S3 에 올린다

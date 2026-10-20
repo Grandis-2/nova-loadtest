@@ -28,9 +28,27 @@
 - [ ] main의 `build.yml` 마지막 실행이 성공했다(`latest`가 main을 가리킨다). 실패했으면 [build.yml 이 실패했을 때](#buildyml-이-실패했을-때)를 본다
 - [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest` 실행 목록에 진행 중인 실행이 없다
 
-### 시험 상품(관리자 화면)
+### 시험 상품
 
 시험마다 새 시험 상품을 쓴다. spike는 진입할 상품(`product_id`)과 준비에 쓸 상품(`prep_product_id`) 두 개가 필요하다.
+
+`cmd/testproduct`로 만든다. 담당자가 자기 관리자 세션으로 직접 돌리고, 관리자 토큰은 저장소, 워크플로, AWS 어디에도 남지 않는다.
+
+```sh
+read -rs NOVA_ADMIN_TOKEN && export NOVA_ADMIN_TOKEN   # 관리자 화면에 로그인한 세션의 토큰
+go run ./controller/cmd/testproduct -dry-run           # 보낼 본문 확인
+go run ./controller/cmd/testproduct                    # smoke, load, stress, soak: 상품 하나
+go run ./controller/cmd/testproduct -spike             # spike: 준비 상품과 진입 상품
+unset NOVA_ADMIN_TOKEN
+```
+
+- 명령은 사전예약 상품(공개, 옵션 두 개, 배송 차수 하나)을 등록하고, preorder가 회차를 만들 때까지 기다린 뒤, 공개 상세가 판매 중인지 확인한다. 마지막에 `loadtest.yml`에 넣을 값과 실행해도 되는 시각을 출력한다.
+- be는 회차를 **지금부터 30분 뒤**부터 열 수 있게 한다. 그래서 시험 30분 이상 전에 만든다. 기본 오픈은 지금 + 31분 남짓, 회차 길이는 12시간(`-length`)이다.
+- spike는 준비 상품을 먼저 열고, 진입 상품은 그 30분 뒤(`-open-at`)에 연다. 준비 상품이 열린 뒤, 진입 상품 오픈 15분 전까지 실행한다.
+- 비공개 상품은 대기열이 줄을 열지 않으므로 공개로 만든다. 이름이 `[부하 시험]`으로 시작해 실제 사용자도 시험 상품임을 알 수 있다.
+- 중간에 실패해도 이미 만든 상품은 남는다. 출력된 상품 ID와 `Idempotency-Key`로 관리자 화면에서 마감한다.
+
+명령을 쓰지 않고 관리자 화면에서 직접 만들 때는 아래를 확인한다. 명령으로 만들었으면 앞의 다섯 항목은 이미 맞다.
 
 - [ ] 판매 방식 선주문, 상태 판매 중, 노출 켬
 - [ ] 옵션이 하나 이상 있고 판매 중이다

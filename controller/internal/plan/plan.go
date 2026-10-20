@@ -121,7 +121,19 @@ type Plan struct {
 	Windows         []Window     `json:"windows"`
 	Estimates       Estimates    `json:"estimates"`
 	Warnings        []string     `json:"warnings,omitempty"`
+	Rush            *Rush        `json:"rush,omitempty"`
 }
+
+// Rush는 rush 흐름이 접수 뒤에 쓰는 값이다(scenarios.yml rush). k6가 PLAN_JSON에서 읽는다
+type Rush struct {
+	PayRatio              float64 `json:"pay_ratio"`
+	NotifyIntervalSeconds int     `json:"notify_interval_seconds"`
+	NotifyTimeoutSeconds  int     `json:"notify_timeout_seconds"`
+}
+
+// rushPayRequests는 rush에서 결제하는 회원이 알림을 받은 뒤 보내는 요청이다(알림 목록, 예약 상세, 주문, 결제 시도).
+// 알림 수 확인은 따로 센다
+const rushPayRequests = 4
 
 // StartAt은 컨트롤러가 정할 시작 시각이다. open_at이 있으면 본 시험이 그 시각에 시작하도록 거꾸로 잡는다.
 func (p *Plan) StartAt(cfg *config.Config, now time.Time) time.Time {
@@ -153,10 +165,25 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		fail("시험 ID %q는 lt-<yyyymmddThhmm>-<번호> 형식이고 36자 이하여야 한다", in.TestID)
 	}
 
-	// 흐름
+	// 흐름. rush는 흐름이 정해져 있다. 몰린 회원 한 명이 진입부터 결제 시도까지 가므로 진입과 주문을 같이 센다
+	rush := sc.Shape == config.ShapeRush
 	flows := in.Flows
 	if len(flows) == 0 {
 		flows = config.FlowOrder
+	}
+	if rush {
+		if len(in.Flows) > 0 {
+			fail("rush에는 flows를 쓰지 않는다(배경 상품 조회, 진입, 주문이 정해져 있다)")
+		}
+		flows = []string{"entry"}
+		for _, f := range config.FlowOrder {
+			if sc.Background[f] > 0 {
+				flows = append(flows, f)
+			}
+		}
+		if sc.Rush.PayRatio > 0 {
+			flows = append(flows, "order")
+		}
 	}
 	flows = slices.Clone(flows)
 	for _, f := range flows {
@@ -170,6 +197,10 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	flows = slices.Compact(flows)
 	has := func(f string) bool { return slices.Contains(flows, f) }
 	usesPool := func(p config.Pool) bool {
+		// rush의 주문은 몰린 회원(풀 A)이 한다
+		if rush && p != config.PoolA {
+			return false
+		}
 		for _, f := range flows {
 			if cfg.Flows[f].Pool == p {
 				return true
@@ -225,6 +256,15 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	needPrep := usesPool(config.PoolB) || usesPool(config.PoolC)
 	if needPrep && prep == "" {
 		fail("조회, 결제, 취소 흐름에는 prep_product_id(또는 product_id)가 필요하다")
+	}
+
+	if rush {
+		if in.OpenAt == "" {
+			fail("rush에는 open_at이 필요하다")
+		}
+		if in.PrepProductID != "" {
+			fail("rush에는 prep_product_id를 쓰지 않는다(준비 구간이 없다)")
+		}
 	}
 
 	// spike
@@ -456,10 +496,55 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			}
 			windows = append(windows, Window{"spike", ms, ms + mainLen})
 		}
+
+	case config.ShapeRush:
+		p.Multiplier = 1
+		burstS := int(sc.BurstSeconds)
+		observeS := int(dur.Seconds())
+		mainLen = 1 + burstS + observeS // 몰림은 open_at + 1초에 시작한다(spike와 같다)
+		r := sc.Rush
+		if dur <= r.NotifyTimeout.D() {
+			fail("rush의 duration %s는 알림 대기 상한 %s보다 길어야 한다(결제가 관찰 시간 안에 끝나게)", dur, r.NotifyTimeout.D())
+		}
+		p.Rush = &Rush{PayRatio: r.PayRatio, NotifyIntervalSeconds: int(r.NotifyInterval.D().Seconds()),
+			NotifyTimeoutSeconds: int(r.NotifyTimeout.D().Seconds())}
+		bg := map[string]float64{}
+		for _, f := range flows {
+			if v := sc.Background[f]; v > 0 {
+				bg[f] = quant(v)
+			}
+		}
+		peak = quant(peak)
+		admitted := math.Min(peak, cfg.AdmissionRPS)
+		waiting := math.Max(0, (peak-cfg.AdmissionRPS)*float64(burstS))
+		// 몰림: 진입 전에 상품 상세를 한 번 보고(WAF 요청 1건), 접수는 입장 속도를 넘지 않는다
+		burst := phase{rates: clone(bg), extraQ: waiting / cfg.PollIntervalSeconds}
+		burst.rates["entry"] = peak
+		burst.extraW = peak + (admitted-peak)*cfg.Flows["entry"].Requests
+		if r.PayRatio > 0 {
+			// 결제: 접수한 순서(입장 속도)대로 등록 알림을 받는다고 본다. 입장이 이어지는 동안 앞쪽 회원의 결제가
+			// 시작되므로 몰림과 같은 구간에 더하고, 알림 수 확인은 결제할 회원이 모두 함께 기다리는 경우로 크게 잡는다
+			payRate := quant(admitted * r.PayRatio)
+			payers := peak * float64(burstS) * r.PayRatio
+			burst.rates["order"] = payRate
+			burst.extraW += payRate*(rushPayRequests-cfg.Flows["order"].Requests) + payers/r.NotifyInterval.D().Seconds()
+		}
+		phases = append(phases, burst)
+		entryTotal = peak*float64(burstS) + poolSlack(cfg)
+		build = func(ms int) {
+			for _, f := range flows {
+				if _, ok := bg[f]; ok {
+					addConstant(f, f, bg[f], ms, mainLen, bg[f]*cfg.Flows[f].IterationSeconds)
+				}
+			}
+			// 몰린 회원은 진입부터 결제 시도까지 VU를 하나씩 잡는다. 관찰 시간 끝까지 기다릴 수 있게 둔다
+			addConstant("rush", "rush", peak, ms+1, burstS, peak*float64(burstS))
+			windows = append(windows, Window{"rush", ms, ms + mainLen})
+		}
 	}
 
 	// 풀 A(spike는 위에서 시나리오마다 더했다)와 풀 C에도 여유를 둔다
-	if sc.Shape != config.ShapeSpike {
+	if sc.Shape != config.ShapeSpike && sc.Shape != config.ShapeRush {
 		entryTotal += poolSlack(cfg)
 	}
 	if usesPool(config.PoolC) {
@@ -484,8 +569,12 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	// 진입 시나리오는 줄에 선 회원이 잘리지 않게 오래 기다린다
 	graceful := int(cfg.Runner.EntryGracefulStop.D().Seconds())
 	for i := range p.Scenarios {
-		if p.Scenarios[i].Flow == "entry" || p.Scenarios[i].Flow == "prepare" {
+		switch p.Scenarios[i].Flow {
+		case "entry", "prepare":
 			p.Scenarios[i].GracefulStop = secs(graceful)
+		case "rush":
+			// 몰림 10초 뒤에도 줄, 등록 알림, 결제가 관찰 시간 동안 이어진다
+			p.Scenarios[i].GracefulStop = secs(p.MainEnd - p.MainStart - 1 - int(sc.BurstSeconds) + graceful)
 		}
 	}
 	total := p.MainEnd

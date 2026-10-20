@@ -97,7 +97,7 @@ jobs:
           IMAGE: ${{ matrix.image }}
         run: docker buildx build --platform linux/amd64 -f "$IMAGE/Dockerfile" -t "nova-loadtest/$IMAGE:ci" .
 
-  # k6 스크립트를 계획 다섯 가지로 해석해 본다(k6 inspect)
+  # k6 스크립트를 시나리오마다 계획으로 해석해 본다(k6 inspect)
   k6-inspect:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
@@ -116,12 +116,13 @@ jobs:
           go build -o "$RUNNER_TEMP/plan" ./controller/cmd/plan
           p=a1b2c3d4-0000-4000-8000-000000000001
           q=a1b2c3d4-0000-4000-8000-000000000002
-          # open_at 은 지금부터 1시간 안이어야 한다(max_open_at_lead). spike 만 쓴다
+          # open_at 은 지금부터 1시간 안이어야 한다(max_open_at_lead). spike 와 rush 만 쓴다
           open_at=$(date -u -d '+30 minutes' +%Y-%m-%dT%H:%M:%SZ)
-          for s in smoke load spike stress soak; do
+          for s in smoke load spike rush stress soak; do
             extra=""
             [ "$s" = spike ] && extra="-prep-product-id $q -open-at $open_at"
-            # shellcheck disable=SC2086 # extra 는 비거나 인자 네 개다
+            [ "$s" = rush ] && extra="-open-at $open_at"
+            # shellcheck disable=SC2086 # extra 는 비거나 인자 두 개 또는 네 개다
             "$RUNNER_TEMP/plan" -test-id lt-20261020t0630-1 -scenario "$s" -product-id "$p" $extra \
               -json "$RUNNER_TEMP/plan-$s.json"
             docker run --rm -v "$PWD/k6:/k6:ro" -e TEST_ID=lt-20261020t0630-1 -e BASE_URL=http://127.0.0.1:9 \
@@ -137,7 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [ok, error, sigterm, tokenfail]
+        mode: [ok, rush, error, sigterm, tokenfail]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

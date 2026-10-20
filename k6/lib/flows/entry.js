@@ -1,4 +1,4 @@
-// 진입 → 순번 확인 → 입장권 → 접수. 준비 구간(prepare.js)도 상품과 회원만 바꿔 이 흐름을 쓴다.
+// 진입 → 순번 확인 → 입장권 → 접수. 준비 구간과 rush 도 상품과 회원만 바꿔 이 흐름을 쓴다.
 //
 // be waitingroom QueueController, preorder PreorderController (4d5863cb)
 // - POST /api/v1/preorders/queue?productId= : 200 ADMITTED(admissionTicket) 또는 202 WAITING(queueToken, Retry-After)
@@ -24,7 +24,7 @@ function enter(productId, token) {
 
 /**
  * 회원 member 로 상품 productId 의 옵션 optionId 를 접수한다.
- * @returns {boolean} 접수했는가
+ * @returns {object|null} 접수 응답의 data(preorderId 등). 접수하지 못했으면 null
  */
 export function enterAndAccept(member, productId, optionId) {
   const started = Date.now();
@@ -64,10 +64,10 @@ export function enterAndAccept(member, productId, optionId) {
     }
     // SALE_CLOSED, SALE_NOT_OPEN, QUEUE_FULL 같은 오류는 http.js 가 error_code 로 세었다
     outcomes.add(1, { outcome: status === 'CLOSED' ? `closed_${body.reason}` : 'rejected' });
-    return false;
+    return null;
   }
   outcomes.add(1, { outcome: 'poll_limit' });
-  return false;
+  return null;
 }
 
 function accept(member, productId, optionId, ticket, started) {
@@ -88,5 +88,5 @@ function accept(member, productId, optionId, ticket, started) {
     entryToAccept.add(Date.now() - started);
   }
   outcomes.add(1, { outcome: ok ? 'accepted' : 'accept_failed' });
-  return ok;
+  return ok ? data(res) || {} : null;
 }

@@ -42,6 +42,10 @@ func TestParseRejects(t *testing.T) {
 		{"음수 배경 트래픽", "      cancel: 1\n", "      cancel: -1\n", "background.cancel"},
 		{"0초 gracefulStop", "entry_graceful_stop: 3m", "entry_graceful_stop: 0s", "entry_graceful_stop"},
 		{"음수 시계열 값", "counters_per_name: 2", "counters_per_name: -100", "series"},
+		{"rush 결제 비율이 1보다 크다", "pay_ratio: 0.5", "pay_ratio: 1.5", "scenarios.rush.rush"},
+		{"rush 알림 상한이 관찰 시간보다 길다", "notify_timeout: 8m", "notify_timeout: 15m", "scenarios.rush.rush"},
+		{"rush 배경에 회원 흐름", "    background:            # 준비 구간이 없어 회원이 필요 없는 상품 조회만 둔다\n      catalog: 200",
+			"    background:\n      catalog: 200\n      preorders: 30", "scenarios.rush.background.preorders"},
 		{"회원 범위 넘침", "  start: 1 ", "  start: 9223372036854775000 ", "members.start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

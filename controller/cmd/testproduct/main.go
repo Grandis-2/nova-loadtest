@@ -3,6 +3,7 @@
 //	export NOVA_ADMIN_TOKEN=...   # 관리자 화면 로그인의 sessionToken. 셸 기록에 남지 않게 read -rs 로 넣는다
 //	go run ./controller/cmd/testproduct                          # smoke, load, stress, soak: 상품 하나
 //	go run ./controller/cmd/testproduct -spike                   # spike: 준비 상품과 진입 상품
+//	go run ./controller/cmd/testproduct -rush                    # rush: 상품 하나. 회차가 열리는 시각이 open_at 이다
 //	go run ./controller/cmd/testproduct -dry-run                 # 보낼 본문만 출력한다
 //
 // 관리자 토큰은 환경 변수로만 받고 출력하지 않는다. 회차는 be 규칙상 지금부터 30분 뒤부터 열 수 있다.
@@ -28,7 +29,7 @@ func main() {
 	var (
 		baseURL, opensAt, openAt, categoryID string
 		length                               time.Duration
-		spike, dryRun                        bool
+		spike, rush, dryRun                  bool
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("BASE_URL", defaultBaseURL), "API 주소")
 	flag.StringVar(&opensAt, "opens-at", "", "회차가 열리는 시각(RFC 3339). 비우면 지금 + 31분(분 단위 올림). spike 에서는 준비 상품의 오픈")
@@ -36,6 +37,7 @@ func main() {
 	flag.DurationVar(&length, "length", 12*time.Hour, "회차 길이(오픈부터 마감까지). 시험이 끝나는 시각보다 길게 둔다")
 	flag.StringVar(&categoryID, "category-id", "", "카테고리 ID. 비우면 공개 카테고리 트리의 이어폰 카테고리(없으면 하위가 없는 첫 카테고리)")
 	flag.BoolVar(&spike, "spike", false, "spike 용으로 준비 상품과 진입 상품을 만든다")
+	flag.BoolVar(&rush, "rush", false, "rush 용 상품을 만든다. 회차가 열리기 전에 실행하도록 안내한다")
 	flag.BoolVar(&dryRun, "dry-run", false, "보내지 않고 본문만 출력한다")
 	flag.Parse()
 
@@ -45,6 +47,9 @@ func main() {
 		fatal("-opens-at: %v", err)
 	}
 	specs := []testproduct.Spec{{OpensAt: first, ClosesAt: first.Add(length)}}
+	if spike && rush {
+		fatal("-spike 와 -rush 는 같이 쓰지 않는다")
+	}
 	if spike {
 		entry, err := parseOr(openAt, first.Add(30*time.Minute))
 		if err != nil {
@@ -118,7 +123,7 @@ func main() {
 		made = append(made, p)
 	}
 	report(made)
-	guide(made, spike)
+	guide(made, spike, rush)
 }
 
 // report 는 만든 상품을 출력한다. 중간에 실패해도 이미 만든 상품은 남으므로 먼저 보여 준다(정리할 때 쓴다).
@@ -129,9 +134,21 @@ func report(ps []testproduct.Product) {
 	}
 }
 
-func guide(ps []testproduct.Product, spike bool) {
+func guide(ps []testproduct.Product, spike, rush bool) {
 	fmt.Println()
 	fmt.Println("loadtest.yml 입력")
+	if rush {
+		p := ps[0]
+		cfg, err := config.Default()
+		if err != nil {
+			fatal("%v", err)
+		}
+		// 준비 상품이 없으므로 지금부터 실행할 수 있다. open_at 이 plan 의 상한 안에 들어야 한다
+		start, end := runWindow(time.Now(), p.OpensAt, cfg.Runner.MaxOpenAtLead.D())
+		fmt.Printf("  scenario: rush\n  product_id: %s\n  open_at: %s\n", p.ID, p.OpensAt.Format(time.RFC3339))
+		fmt.Printf("\n%s 뒤, %s 전에 실행한다(회차가 열리기 전).\n", local(start), local(end))
+		return
+	}
 	if !spike {
 		p := ps[0]
 		fmt.Printf("  product_id: %s\n", p.ID)
@@ -161,7 +178,7 @@ func prefix(label string) string {
 // runLead 는 spike 실행을 진입 상품 오픈보다 얼마나 앞서 해야 하는가다. 준비 구간, 등록 대기, 토큰 발급, k6 기동이 그 사이에 든다
 const runLead = 15 * time.Minute
 
-// runWindow 는 spike 를 실행해도 되는 구간이다. 준비 상품이 열린 뒤이면서 open_at 이 plan 의 상한(maxLead,
+// runWindow 는 spike, rush 를 실행해도 되는 구간이다. 준비 상품이 열린 뒤(rush 는 지금)이면서 open_at 이 plan 의 상한(maxLead,
 // scenarios.yml runner.max_open_at_lead) 안에 들고, 진입 상품 오픈 15분 전까지다
 func runWindow(prepOpens, entryOpens time.Time, maxLead time.Duration) (time.Time, time.Time) {
 	start := prepOpens

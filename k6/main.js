@@ -7,6 +7,7 @@ import { cancelFlow } from './lib/flows/cancel.js';
 import { entryFlow, prepareFlow } from './lib/flows/entry_flows.js';
 import { orderFlow } from './lib/flows/order.js';
 import { preordersFlow } from './lib/flows/preorders.js';
+import { rushFlow } from './lib/flows/rush.js';
 
 function scenarios() {
   const out = {};
@@ -79,6 +80,10 @@ export function cancel() {
 
 export function prepare(setupData) {
   prepareFlow(setupData);
+}
+
+export function rush(setupData) {
+  rushFlow(setupData);
 }
 
 // 요약은 JSON 하나만 쓴다. k6-runner 가 종료 코드와 함께 S3 results/<시험 ID>/k6-<태스크>.json 에 올린다

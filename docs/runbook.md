@@ -30,7 +30,7 @@
 
 ### 시험 상품
 
-시험마다 새 시험 상품을 쓴다. spike는 진입할 상품(`product_id`)과 준비에 쓸 상품(`prep_product_id`) 두 개가 필요하다.
+시험마다 새 시험 상품을 쓴다. spike는 진입할 상품(`product_id`)과 준비에 쓸 상품(`prep_product_id`) 두 개가 필요하다. rush는 상품 하나만 쓰고, 그 회차가 열리는 시각을 `open_at`으로 넣는다.
 
 `cmd/testproduct`로 만든다. 담당자가 자기 관리자 세션으로 직접 돌리고, 관리자 토큰은 저장소, 워크플로, AWS 어디에도 남지 않는다.
 
@@ -39,12 +39,14 @@ read -rs NOVA_ADMIN_TOKEN && export NOVA_ADMIN_TOKEN   # 관리자 화면에 로
 go run ./controller/cmd/testproduct -dry-run           # 보낼 본문 확인
 go run ./controller/cmd/testproduct                    # smoke, load, stress, soak: 상품 하나
 go run ./controller/cmd/testproduct -spike             # spike: 준비 상품과 진입 상품
+go run ./controller/cmd/testproduct -rush              # rush: 상품 하나, 회차가 열리기 전에 실행
 unset NOVA_ADMIN_TOKEN
 ```
 
 - 명령은 사전예약 상품(공개, 옵션 두 개, 배송 차수 하나)을 등록하고, preorder가 회차를 만들 때까지 기다린 뒤, 공개 상세가 판매 중인지 확인한다. 마지막에 `loadtest.yml`에 넣을 값과 실행해도 되는 시각을 출력한다.
 - be는 회차를 **지금부터 30분 뒤**부터 열 수 있게 한다. 그래서 시험 30분 이상 전에 만든다. 기본 오픈은 지금 + 31분 남짓, 회차 길이는 12시간(`-length`)이다.
 - spike는 준비 상품을 먼저 열고, 진입 상품은 그 30분 뒤(`-open-at`)에 연다. 준비 상품이 열린 뒤, 진입 상품 오픈 15분 전까지 실행한다. `-open-at`을 준비 상품 오픈 15분 안으로 주면 거절하고, 75분보다 멀게 주면 `open_at`이 1시간 안에 들도록 출력하는 실행 시작 시각을 늦춘다.
+- rush는 회차가 열리기 전에 실행한다. 상품을 만든 뒤, 회차 오픈 15분 전까지 실행한다(토큰 5,000개 발급과 k6 기동이 그 사이에 든다).
 - 비공개 상품은 대기열이 줄을 열지 않으므로 공개로 만든다. 이름이 `[부하 시험]`으로 시작해 실제 사용자도 시험 상품임을 알 수 있다.
 - 중간에 실패해도 이미 만든 상품은 남는다. 출력된 상품 ID와 `Idempotency-Key`로 관리자 화면에서 마감한다.
 
@@ -52,7 +54,7 @@ unset NOVA_ADMIN_TOKEN
 
 - [ ] 판매 방식 선주문, 상태 판매 중, 노출 켬
 - [ ] 옵션이 하나 이상 있고 판매 중이다
-- [ ] 회차의 `opensAt`이 시험 시작 전이다. spike의 진입 상품은 `open_at`(본 시험 시작 시각)으로 둔다
+- [ ] 회차의 `opensAt`이 시험 시작 전이다. spike의 진입 상품과 rush의 상품은 `open_at`(본 시험 시작 시각)으로 둔다
 - [ ] 회차의 `closesAt`이 시험 예상 종료 시각보다 뒤다(계획 표의 "예상 시간")
 - [ ] 배송 차수가 있다
 - [ ] 회차 일정이 대기열 서비스에 전달됐다(C-4에서 확인 방법을 채운다)
@@ -83,10 +85,10 @@ Actions → `loadtest` → Run workflow(브랜치 main). 입력은 [설정과 �
 
 | 입력 | 내용 | 비우면 |
 |---|---|---|
-| `scenario` | `smoke`, `load`, `spike`, `stress`, `soak` | `smoke` |
+| `scenario` | `smoke`, `load`, `spike`, `rush`, `stress`, `soak` | `smoke` |
 | `product_id` | 진입할 시험 상품 ID(필수) | |
-| `prep_product_id` | 준비 구간 상품. spike는 필수 | `product_id` |
-| `open_at` | 판매가 열리는 시각(RFC3339). spike만 | |
+| `prep_product_id` | 준비 구간 상품. spike는 필수, rush는 비운다 | `product_id` |
+| `open_at` | 판매가 열리는 시각(RFC3339). spike와 rush만(필수) | |
 | `peak_rps` | 흐름 시작 수 합계(초당) | 시나리오 기본값 |
 | `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`) | 시나리오 기본값 |
 | `runners` | k6 태스크 대수. 계산한 값보다 적으면 멈춘다 | 계산한 값 |

@@ -127,7 +127,7 @@ nova-loadtest/
 - 흐름 하나가 k6 시나리오 하나다. 실행기는 도착률 기반만 쓴다.
 - 모든 요청에 `tags.name`을 경로 템플릿으로 붙인다. `systemTags`는 `status, method, name, scenario, expected_response`다(`url`은 넣지 않는다).
   - 요청은 `lib/http.js`의 함수로만 보낸다. 이 함수는 경로 템플릿과 값을 따로 받아(`req('GET', '/api/v1/products/{id}', {id})`) URL을 만들고, 템플릿을 그대로 `tags.name`에 넣는다. 템플릿이 아래 목록에 없으면 예외를 던진다.
-  - 템플릿 목록(10개, 메서드까지 치면 12가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/categories`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/active`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
+  - 템플릿 목록(14개, 메서드까지 치면 16가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/products/{id}/reviews`, `/api/v1/preorders/products/{id}/shipment-batches`, `/api/v1/categories`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/active`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`, `/api/v1/notifications`, `/api/v1/notifications/unread-count`. 목록을 늘리면 `scenarios.yml`의 `series.names`도 맞춘다. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
   - `ci.yml`의 검사: `lib/http.js` 밖에서 `k6/http`를 바로 부르면 실패한다. k6-safety 작업에서 시험용 응답 서버로 흐름을 돌리고, 나온 `name` 값이 모두 목록 안에 있는지 확인한다.
 - `options.userAgent = 'nova-loadtest/' + TEST_ID`로 둔다. `lib/http.js`의 공통 헤더에 `User-Agent`를 넣지 않는다(넣으면 옵션을 덮는다).
 - `handleSummary`는 JSON 요약 하나만 파일로 쓴다. `setup()`은 토큰이나 헤더 값을 반환하지 않는다(요약에 들어간다).

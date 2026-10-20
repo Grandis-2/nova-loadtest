@@ -86,6 +86,10 @@ export function catalogSetup(products) {
     }
   };
   walk(tree && tree.items, 0);
+  // 준비하지 못하면 그 경로를 말없이 건너뛰어 계획과 다른 부하가 나간다. 시작하기 전에 멈춘다
+  if ((P.category > 0 || P.home_rows > 0) && all.length === 0) {
+    throw new Error('카테고리 트리를 받지 못했다(GET /api/v1/categories). 카테고리 목록과 홈의 대분류 줄을 보낼 수 없다');
+  }
   const words = new Set();
   for (const p of products) {
     if (p.modelName) {
@@ -95,6 +99,9 @@ export function catalogSetup(products) {
     if (first && !first.startsWith('[')) {
       words.add(first.slice(0, 50));
     }
+  }
+  if (P.search > 0 && words.size === 0) {
+    throw new Error('검색어를 뽑을 상품이 없다(GET /api/v1/products). 검색을 보낼 수 없다');
   }
   return { categories: { top, all }, keywords: [...words] };
 }

@@ -6,7 +6,8 @@
 // - preorder 가 REGISTERED 로 바꾸면 PREORDER_REGISTERED 알림을 만들고(NotificationRequested), member 가 저장한다
 // - 화면은 GET /api/v1/notifications/stream(SSE)으로 안 읽은 수를 받는다. k6 에는 SSE 가 없어
 //   GET /api/v1/notifications/unread-count 를 PLAN.rush.notify_interval_seconds 마다 불러 흉내 낸다
-// - 알림 목록 GET /api/v1/notifications?size= : 커서 페이지 {items: [{kind, target: {type, id}}], nextCursor}
+// - 알림 목록 GET /api/v1/notifications?size= : 최신순 커서 페이지 {items: [{kind, target: {type, id}}], nextCursor}.
+//   첫 쪽(화면 기본 20건)만 본다. 시험 중에 회원 한 명에게 오는 새 알림은 이 예약의 등록 알림뿐이라 늘 맨 앞이다
 // - 주문은 REGISTERED 전이면 409 PREORDER_NOT_PAYABLE 이다
 import { sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
@@ -54,11 +55,14 @@ function waitRegistered(member, preorderId, acceptedAt) {
     if (n === null || n <= seen) {
       continue;
     }
+    const page = data(req('GET', '/api/v1/notifications', { query: { size: 20 }, token: member.token, needBody: true }));
+    if (!page || !Array.isArray(page.items)) {
+      // 목록을 받지 못했으면 seen 을 그대로 두어 다음 확인에서 다시 연다. member 가 바쁠 때 한 번 실패한 회원을
+      // 알림이 늦은 회원(notify_timeout)으로 잘못 세지 않게 한다
+      continue;
+    }
     seen = n;
-    const page = data(req('GET', '/api/v1/notifications', { query: { size: 5 }, token: member.token, needBody: true }));
-    const mine = ((page && page.items) || []).find(
-      (x) => x.kind === 'PREORDER_REGISTERED' && x.target && x.target.id === preorderId,
-    );
+    const mine = page.items.find((x) => x.kind === 'PREORDER_REGISTERED' && x.target && x.target.id === preorderId);
     if (mine) {
       acceptToNotified.add(Date.now() - acceptedAt);
       return true;
@@ -105,11 +109,9 @@ export function rushFlow(setup) {
     expect: [201],
     needBody: true,
   });
-  if (paid.status !== 201) {
-    return outcome('payment_failed');
-  }
+  // 결제 시도 응답까지 걸린 시간은 성공과 실패를 가리지 않고 센다. 결과는 rush_outcome 으로 나눈다
   if (OPEN_AT_MS !== null) {
     openToPayment.add(Date.now() - OPEN_AT_MS);
   }
-  outcome('paid');
+  outcome(paid.status === 201 ? 'paid' : 'payment_failed');
 }

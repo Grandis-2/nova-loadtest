@@ -287,10 +287,11 @@ func code(c *int32) string {
 }
 
 // k6Plan은 k6 에 넘기는 계획이다. RunTask 덮어쓰기 상한(8KiB) 때문에 k6 가 쓰는 값만 남긴다.
+// k6 스크립트가 PLAN.<이름> 으로 새 값을 읽으면 여기에도 넣는다(TestK6PlanHasWhatK6Reads 가 확인한다)
 func k6Plan(p *plan.Plan) string {
 	b, _ := json.Marshal(map[string]any{
 		"test_id": p.TestID, "flows": p.Flows, "product_id": p.ProductID, "prep_product_id": p.PrepProductID,
-		"abort_error_rate": p.AbortErrorRate, "scenarios": p.Scenarios,
+		"abort_error_rate": p.AbortErrorRate, "scenarios": p.Scenarios, "open_at": p.OpenAt, "rush": p.Rush,
 	})
 	return string(b)
 }

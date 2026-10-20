@@ -27,6 +27,7 @@ import (
 	"github.com/Grandis-2/nova-loadtest/config"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/clock"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/fakeecs"
+	"github.com/Grandis-2/nova-loadtest/controller/internal/plan"
 )
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -154,7 +155,10 @@ func catalogPhase(status, phase string, promoted ...string) *httptest.Server {
 		}
 		switch r.URL.Path {
 		case "/api/v1/promotions":
-			io.WriteString(w, `{"success":true,"data":{"items":[{"promotionId":"pr1"},{"promotionId":"pr2"}]}}`)
+			// pr3 은 목록에는 남았지만 상세가 404 인 사전예약이다(막 끝나 캐시된 목록에 남은 경우)
+			io.WriteString(w, `{"success":true,"data":{"items":[{"promotionId":"pr3"},{"promotionId":"pr1"},{"promotionId":"pr2"}]}}`)
+		case "/api/v1/promotions/pr3":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/promotions/pr1":
 			products := []map[string]string{}
 			for _, id := range promoted {
@@ -191,7 +195,7 @@ func TestPrecheckPhase(t *testing.T) {
 	}
 }
 
-// 사전예약에 묶이지 않은 상품은 막는다. 대문자 ID 도 같은 상품으로 본다
+// 사전예약에 묶이지 않은 상품은 막는다. 대문자 ID 도 같은 상품으로 본다. 상관없는 사전예약의 상세가 실패해도 막지 않는다
 func TestPrecheckPromoted(t *testing.T) {
 	srv := catalogPhase("ACTIVE", "OPEN", "a1b2c3d4-0000-4000-8000-00000000000A")
 	defer srv.Close()
@@ -200,11 +204,37 @@ func TestPrecheckPromoted(t *testing.T) {
 		t.Errorf("묶인 상품은 통과해야 한다: %v", err)
 	}
 	err := Precheck(ctx, srv.Client(), srv.URL, "lt-x", Want{ID: "other", Promoted: true})
-	if err == nil || !strings.Contains(err.Error(), "사전예약") {
-		t.Errorf("묶이지 않은 상품은 막아야 한다: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "사전예약") || !strings.Contains(err.Error(), "pr3") {
+		t.Errorf("묶이지 않은 상품은 막고, 읽지 못한 사전예약을 알려야 한다: %v", err)
 	}
 	if err := Precheck(ctx, srv.Client(), srv.URL, "lt-x", Want{ID: "other"}); err != nil {
 		t.Errorf("Promoted 가 없으면 사전예약을 보지 않는다(홍보를 만들기 전의 testproduct): %v", err)
+	}
+}
+
+// 준비 상품은 진입 상품과 같아도, 진입 흐름이 없어도 지금 접수 중이어야 한다
+func TestPrechecks(t *testing.T) {
+	both := []string{BeforeOpen, Open}
+	for _, c := range []struct {
+		name string
+		p    plan.Plan
+		want []Want
+	}{
+		{"진입과 준비가 같다", plan.Plan{Flows: []string{"entry", "order"}, ProductID: "a", PrepProductID: "a"},
+			[]Want{{ID: "a", Phases: []string{Open}, Promoted: true}}},
+		{"open_at 이 있어도 같은 준비 상품이면 열려 있어야 한다", plan.Plan{Flows: []string{"entry", "order"}, ProductID: "a", PrepProductID: "a", OpenAt: "t"},
+			[]Want{{ID: "a", Phases: []string{Open}, Promoted: true}}},
+		{"진입 없이 준비만", plan.Plan{Flows: []string{"preorders", "order"}, ProductID: "a", PrepProductID: "a"},
+			[]Want{{ID: "a", Phases: []string{Open}, Promoted: true}}},
+		{"spike 의 두 상품", plan.Plan{Flows: []string{"entry", "order"}, ProductID: "a", PrepProductID: "b", OpenAt: "t"},
+			[]Want{{ID: "a", Phases: both, Promoted: true}, {ID: "b", Phases: []string{Open}, Promoted: true}}},
+		{"rush", plan.Plan{Flows: []string{"catalog", "entry", "order"}, ProductID: "a", OpenAt: "t"},
+			[]Want{{ID: "a", Phases: both, Promoted: true}}},
+		{"상품 조회만", plan.Plan{Flows: []string{"catalog"}}, nil},
+	} {
+		if got := prechecks(&c.p); fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%s: %v, 기대 %v", c.name, got, c.want)
+		}
 	}
 }
 

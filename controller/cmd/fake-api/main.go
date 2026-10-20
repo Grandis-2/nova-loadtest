@@ -421,7 +421,6 @@ func categoryTree() []map[string]any {
 	return []map[string]any{node(1, node(11), node(12)), node(2, node(21)), node(3)}
 }
 
-// visible 은 지금 보이는 알림이다. 최신순이다
 // register 는 등록을 마칠 때가 지난 예약을 REGISTERED 로 바꾼다. s.mu 를 잡고 부른다
 func (s *server) register(sub string) {
 	now := time.Now()
@@ -432,6 +431,7 @@ func (s *server) register(sub string) {
 	}
 }
 
+// visible 은 지금 보이는 알림이다. 최신순이다
 func (s *server) visible(sub string) []notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -199,6 +199,7 @@ func Precheck(ctx context.Context, client *http.Client, baseURL, testID string, 
 		return nil
 	}
 	var promoted map[string]bool
+	var failed []string
 	for _, w := range wants {
 		id := w.ID
 		if id == "" {
@@ -243,19 +244,25 @@ func Precheck(ctx context.Context, client *http.Client, baseURL, testID string, 
 		}
 		if promoted == nil {
 			var err error
-			if promoted, err = promotedProducts(get); err != nil {
+			if promoted, failed, err = promotedProducts(get); err != nil {
 				return fmt.Errorf("사전예약 목록을 확인하지 못했다: %w", err)
 			}
 		}
 		if !promoted[strings.ToLower(id)] {
-			return fmt.Errorf("시험 상품 %s 가 지금 보이는 사전예약(홍보)에 묶여 있지 않다. testproduct 로 만들거나 관리자 화면에서 묶고, 기간에 오늘이 드는지 본다", id)
+			note := ""
+			if len(failed) > 0 {
+				note = fmt.Sprintf(" 상세를 읽지 못한 사전예약이 있다: %s", strings.Join(failed, ", "))
+			}
+			return fmt.Errorf("시험 상품 %s 가 지금 보이는 사전예약(홍보)에 묶여 있지 않다. testproduct 로 만들거나 관리자 화면에서 묶고, 기간에 오늘이 드는지 본다.%s", id, note)
 		}
 	}
 	return nil
 }
 
-// promotedProducts 는 지금 보이는 사전예약에 묶인 상품 ID(소문자)다. 목록은 쪽을 나누지 않는다
-func promotedProducts(get func(string, any) error) (map[string]bool, error) {
+// promotedProducts 는 지금 보이는 사전예약에 묶인 상품 ID(소문자)다. 목록은 쪽을 나누지 않는다.
+// 상세를 읽지 못한 사전예약은 건너뛰고 failed 에 남긴다. 시험 상품과 상관없는 사전예약 하나 때문에 시험을 막지 않는다
+// (예를 들어 막 끝난 사전예약이 캐시된 목록에 남아 있으면 상세는 404 다)
+func promotedProducts(get func(string, any) error) (out map[string]bool, failed []string, err error) {
 	var list struct {
 		Data struct {
 			Items []struct {
@@ -264,9 +271,9 @@ func promotedProducts(get func(string, any) error) (map[string]bool, error) {
 		} `json:"data"`
 	}
 	if err := get("/api/v1/promotions", &list); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := map[string]bool{}
+	out = map[string]bool{}
 	for _, it := range list.Data.Items {
 		var d struct {
 			Data struct {
@@ -276,13 +283,14 @@ func promotedProducts(get func(string, any) error) (map[string]bool, error) {
 			} `json:"data"`
 		}
 		if err := get("/api/v1/promotions/"+url.PathEscape(it.PromotionID), &d); err != nil {
-			return nil, fmt.Errorf("사전예약 %s: %w", it.PromotionID, err)
+			failed = append(failed, fmt.Sprintf("%s(%v)", it.PromotionID, err))
+			continue
 		}
 		for _, p := range d.Data.Products {
 			out[strings.ToLower(p.ProductID)] = true
 		}
 	}
-	return out, nil
+	return out, failed, nil
 }
 
 // AppendFile 은 GITHUB_STEP_SUMMARY, GITHUB_OUTPUT 같은 파일에 덧붙인다. 경로가 비면 아무것도 하지 않는다.

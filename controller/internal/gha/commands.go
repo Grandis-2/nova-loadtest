@@ -467,17 +467,23 @@ func Idle(ctx context.Context, e Env, cluster string) error {
 
 // prechecks 는 실행 전에 볼 상품과 접수 단계다. 진입 상품은 open_at 이 있으면 그때 열리므로 오픈 전이어도 되고(이미 열렸어도 몰림은
 // 그 시각에 시작한다), 없으면 지금 접수 중이어야 한다. 준비 상품은 준비 구간에 접수하므로 지금 접수 중이어야 한다.
+// 준비 상품이 진입 상품과 같으면 한 번만 보되 지금 접수 중이어야 한다(진입 흐름이 없어도 준비 상품은 본다).
 // 둘 다 사전예약에 묶여 있어야 한다(k6 는 사전예약 상세에서 "예약하기"를 누른다)
 func prechecks(p *plan.Plan) []Want {
 	var out []Want
-	if slices.Contains(p.Flows, "entry") {
+	entry := slices.Contains(p.Flows, "entry")
+	if entry {
 		phases := []string{Open}
 		if p.OpenAt != "" {
 			phases = []string{BeforeOpen, Open}
 		}
 		out = append(out, Want{ID: p.ProductID, Phases: phases, Promoted: true})
 	}
-	if p.PrepProductID != "" && p.PrepProductID != p.ProductID {
+	switch {
+	case p.PrepProductID == "":
+	case entry && p.PrepProductID == p.ProductID:
+		out[0].Phases = []string{Open}
+	default:
 		out = append(out, Want{ID: p.PrepProductID, Phases: []string{Open}, Promoted: true})
 	}
 	return out

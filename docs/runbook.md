@@ -12,7 +12,7 @@
 | 순서 | 할 일 | 누가 | 어디서 |
 |---|---|---|---|
 | 1 | [실행 전 점검표](#실행-전-점검표) | 실행자 | 관리자 화면, Grafana, GitHub |
-| 2 | [실행](#실행): `loadtest.yml` 입력 → 계획 표 확인 | 실행자 | GitHub Actions |
+| 2 | [실행](#실행): `loadtest-<시나리오>.yml` 입력 → 계획 표 확인 | 실행자 | GitHub Actions |
 | 3 | 승인(environment `loadtest`) | 승인자 | GitHub Actions |
 | 4 | [지켜보기](#지켜보기)와 필요하면 [멈추기](#멈추기) | 실행자 | GitHub Actions, Grafana |
 | 5 | [결과 읽기](#결과-읽기) | 실행자 | 실행 요약, Slack |
@@ -26,7 +26,7 @@
 ### 이미지와 클러스터
 
 - [ ] main의 `build.yml` 마지막 실행이 성공했다(`latest`가 main을 가리킨다). 실패했으면 [build.yml 이 실패했을 때](#buildyml-이-실패했을-때)를 본다
-- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest` 실행 목록에 진행 중인 실행이 없다
+- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest smoke`, `loadtest load`, `loadtest spike`, `loadtest rush`, `loadtest stress`, `loadtest soak` 여섯 워크플로 모두에 진행 중이거나 기다리는 실행이 없다(공통 실행 `_loadtest.yml`은 실행 목록이 따로 없다)
 
 ### 시험 상품
 
@@ -51,7 +51,7 @@ unset NOVA_ADMIN_TOKEN
   3. 원하는 오픈으로 회차를 당긴다.
   4. 공개 상세가 판매 중이고 회차가 오픈 전인지 확인한다.
   5. 홍보 사진을 올리고, 만든 상품을 사전예약(홍보) 하나에 묶는다. 기간은 오늘부터 가장 늦은 마감 날짜까지(한국 날짜)다.
-  6. 상품 ID, 사전예약 ID, `loadtest.yml`에 넣을 값, 실행해도 되는 시각, 정리 순서를 출력한다.
+  6. 상품 ID, 사전예약 ID, 시험 워크플로에 넣을 값, 실행해도 되는 시각, 정리 순서를 출력한다.
 - be는 상품을 등록할 때 회차 오픈을 **지금부터 30분 뒤**부터 받고, 등록한 회차는 열리기 전에 **지금부터 10분 뒤**까지 당길 수 있다. 그래서 명령은 30분 뒤로 등록한 다음 원하는 오픈으로 당긴다. `-opens-at`은 지금 + 13분 이후여야 한다. 기본 오픈은 지금 + 15분 남짓(rush는 25분)이고, 회차 길이는 12시간(`-length`)이다. 당기지 못하면 경고만 하고 등록한 오픈(30분 뒤)을 그대로 쓴다.
 - spike는 준비 상품을 먼저 열고, 진입 상품은 그 25분 뒤(`-open-at`)에 연다. 준비 상품이 열린 뒤, 진입 상품 오픈 15분 전까지 실행한다. `-open-at`을 준비 상품 오픈 15분 안으로 주면 거절하고, 75분보다 멀게 주면 `open_at`이 1시간 안에 들도록 출력하는 실행 시작 시각을 늦춘다.
 - 이미 열린 상품으로 spike를 하려면 `open_at`과 `prep_product_id`를 비운다. 사전 점검은 상품이 열려 있는지 확인하고, 준비 구간이 끝나는 대로 몰림이 시작된다.
@@ -91,14 +91,22 @@ unset NOVA_ADMIN_TOKEN
 
 ### 입력
 
-Actions → `loadtest` → Run workflow(브랜치 main). 입력은 [설정과 비밀 값](configuration.md#워크플로가-러너-명령cmdgha에-넘기는-값)에도 있다.
+Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(브랜치 main). 시나리오마다 워크플로가 따로 있고, 그 시나리오가 쓰는 입력만 보인다. 실행은 모두 공통 워크플로 `_loadtest.yml`이 한다. 입력은 [설정과 비밀 값](configuration.md#워크플로가-러너-명령cmdgha에-넘기는-값)에도 있다.
+
+| 워크플로 | 보이는 입력(필수는 입력 화면에서도 비울 수 없다) |
+|---|---|
+| `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `abort_error_rate` |
+| `loadtest-load.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-spike.yml` | `product_id`(필수), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-rush.yml` | `product_id`(필수), `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
+| `loadtest-stress.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-soak.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 
 | 입력 | 내용 | 비우면 |
 |---|---|---|
-| `scenario` | `smoke`, `load`, `spike`, `rush`, `stress`, `soak` | `smoke` |
-| `product_id` | 진입할 시험 상품 ID(필수) | |
+| `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. `prep_product_id`를 비우면 조회, 결제, 취소의 준비 상품도 된다(그 흐름이 있으면 둘 중 하나는 넣는다). spike, rush는 입력 화면에서도 필수다 | |
 | `prep_product_id` | 준비 구간 상품. `open_at`을 넣은 spike는 필수, rush는 비운다 | `product_id` |
-| `open_at` | 판매가 열리는 시각(RFC3339). rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다 | |
+| `open_at` | 판매가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다. 그 밖의 시나리오는 비우면 바로 시작한다 | 바로 시작 |
 | `peak_rps` | 흐름 시작 수 합계(초당) | 시나리오 기본값 |
 | `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`) | 시나리오 기본값 |
 | `runners` | k6 태스크 대수. 계산한 값보다 적으면 멈춘다 | 계산한 값 |
@@ -108,8 +116,8 @@ Actions → `loadtest` → Run workflow(브랜치 main). 입력은 [설정과 �
 명령줄로도 실행할 수 있다.
 
 ```sh
-gh workflow run loadtest.yml --ref main \
-  -f scenario=smoke -f product_id=<시험 상품 ID> -f flows=catalog -f duration=2m
+gh workflow run loadtest-smoke.yml --ref main -f flows=catalog
+gh workflow run loadtest-spike.yml --ref main -f product_id=<진입 상품> -f prep_product_id=<준비 상품> -f open_at=<UTC 시각>
 ```
 
 ### 계획 표 확인
@@ -124,7 +132,7 @@ gh workflow run loadtest.yml --ref main \
 
 `run` 작업은 environment `loadtest`의 승인을 기다린다. 승인자가 [실행 전 점검표](#실행-전-점검표)를 확인한 뒤 Review deployments → Approve 한다. 승인은 한 번이고, 사전 점검부터 뒷정리까지 한 작업으로 돈다.
 
-- `concurrency: loadtest` 때문에 같은 시간에는 시험이 하나만 돈다. 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 실행이 알림 없이 취소된다. 기다리는 실행은 하나만 둔다.
+- 모든 시험 워크플로가 같은 `concurrency: loadtest` 그룹을 써서 같은 시간에는 시험이 하나만 돈다(시나리오가 달라도 같다). 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 실행이 알림 없이 취소된다. 기다리는 실행은 하나만 둔다.
 
 ## 지켜보기
 

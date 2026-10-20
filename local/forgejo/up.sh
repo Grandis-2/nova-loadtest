@@ -47,7 +47,7 @@ compose up -d --build moto fake-cluster fake-api
 
 "$here/forgejo/mirror.sh"
 
-# 사전 점검이 부르는 주소(loadtest.yml 은 GitHub 이 아닐 때만 vars.BASE_URL 을 쓴다)
+# 사전 점검이 부르는 주소(_loadtest.yml 은 GitHub 이 아닐 때만 vars.BASE_URL 을 쓴다)
 api=http://localhost:3000/api/v1/repos/$user/nova-loadtest/actions/variables/BASE_URL
 body='{"value":"http://fake-api:8080"}'
 # 토큰이 프로세스 인자에 보이지 않게 헤더를 파일로 넘긴다

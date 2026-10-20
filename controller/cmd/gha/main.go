@@ -1,8 +1,8 @@
 // gha 는 GitHub Actions(와 로컬 Forgejo) 러너에서 도는 명령이다. 워크플로가 셸 스크립트 대신 부른다.
 //
-//	gha plan      loadtest.yml plan 작업: 시험 ID 와 계획 시각을 정하고 계획 표를 쓴다(GITHUB_OUTPUT 에 test_id, planned_at)
-//	gha run       loadtest.yml run 작업: SSM 값 읽기와 가리기, 사전 점검, 컨트롤러 실행과 대기, 결과 정리
-//	gha after     loadtest.yml 뒷정리: 시험 ID 의 태스크를 모두 멈추고 토큰을 지운다
+//	gha plan      _loadtest.yml plan 작업: 시험 ID 와 계획 시각을 정하고 계획 표를 쓴다(GITHUB_OUTPUT 에 test_id, planned_at)
+//	gha run       _loadtest.yml run 작업: SSM 값 읽기와 가리기, 사전 점검, 컨트롤러 실행과 대기, 결과 정리
+//	gha after     _loadtest.yml 뒷정리: 시험 ID 의 태스크를 모두 멈추고 토큰을 지운다
 //	gha stop      stop.yml: 시험 ID 의 k6 태스크를 멈춘다
 //	gha cleanup   cleanup.yml: 컨트롤러를 정리 모드로 띄우고 기다린다
 //	gha ecr-login build.yml: ECR 에 docker login 한다(비밀번호는 가린 뒤 표준 입력으로 넘긴다)

@@ -1,4 +1,4 @@
-// plan은 loadtest.yml의 입력 확인 단계에서 계획을 계산한다. 컨트롤러도 같은 코드로 다시 계산한다.
+// plan은 시험 워크플로의 입력 확인 단계에서 계획을 계산한다. 컨트롤러도 같은 코드로 다시 계산한다.
 //
 //	plan -test-id lt-20261020t0630-1 -scenario smoke -product-id <uuid> -json plan.json -summary plan.md
 //

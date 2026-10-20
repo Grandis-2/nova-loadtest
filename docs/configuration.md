@@ -30,9 +30,9 @@ flowchart LR
 
 | 이름 | 종류 | 넣는 곳 | 쓰는 곳 | 내용 |
 |---|---|---|---|---|
-| `AWS_RUN_ROLE_ARN` | 비밀 | environment `loadtest` | `loadtest.yml`의 `run`, `cleanup.yml` | 역할 `nova-prod-loadtest-github-run`의 ARN |
-| `AWS_BUILD_ROLE_ARN` | 비밀 | 저장소 | `build.yml`, `stop.yml`, `loadtest.yml`의 `plan` | 역할 `nova-prod-loadtest-github-build`의 ARN |
-| `SLACK_WEBHOOK_URL` | 비밀 | environment `loadtest` | `loadtest.yml`의 결과 정리 | 결과를 보낼 Slack 채널 |
+| `AWS_RUN_ROLE_ARN` | 비밀 | environment `loadtest` | `_loadtest.yml`의 `run`, `cleanup.yml` | 역할 `nova-prod-loadtest-github-run`의 ARN |
+| `AWS_BUILD_ROLE_ARN` | 비밀 | 저장소 | `build.yml`, `stop.yml`, `_loadtest.yml`의 `plan` | 역할 `nova-prod-loadtest-github-build`의 ARN |
+| `SLACK_WEBHOOK_URL` | 비밀 | environment `loadtest` | `_loadtest.yml`의 결과 정리 | 결과를 보낼 Slack 채널 |
 
 - 역할 ARN에는 계정 ID가 들어 있으므로 워크플로 파일에 적지 않고 비밀로 둔다.
 - 장기 AWS 키는 두지 않는다. 워크플로는 OIDC로 역할을 맡는다.
@@ -43,6 +43,7 @@ flowchart LR
 - 이 저장소는 OIDC 토큰의 `sub`에 저장소 이름 대신 숫자 ID를 쓰는 immutable subject 형식을 쓴다(`gh api repos/Grandis-2/nova-loadtest/actions/oidc/customization/sub`로 확인). 그래서 `sub`는 `repo:Grandis-2@336932992/nova-loadtest@1423176487:…` 형태이다.
 - 시험 실행 역할(`-github-run`)은 `…:environment:loadtest`만 받는다. environment `loadtest`에는 승인자와 "main만 배포" 규칙이 걸려 있다.
 - 빌드 역할(`-github-build`)은 `…:ref:refs/heads/main`만 받는다.
+- 시험은 시나리오별 워크플로가 공통 실행(`_loadtest.yml`)을 부르는 재사용 워크플로로 돈다. `sub`는 기본 구성(`use_default: true`)이라 워크플로 경로(`job_workflow_ref`)가 들어가지 않고, 부른 작업의 environment나 브랜치로 정해진다. 그래서 워크플로 파일을 나눠도 두 역할의 신뢰 조건은 그대로다.
 - 저장소의 OIDC 설정을 바꾸면 `sub`가 달라져 두 역할을 모두 맡을 수 없게 된다. 바꾸려면 시험 스택의 `github_repo`도 같이 바꾼다.
 
 ## AWS Secrets Manager
@@ -87,7 +88,7 @@ flowchart LR
 
 | 환경 변수 | 쓰는 명령 | 내용 |
 |---|---|---|
-| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_ABORT_ERROR_RATE` | `plan`, `run` | `loadtest.yml`의 입력. 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
+| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_ABORT_ERROR_RATE` | `plan`, `run` | 시험 워크플로의 입력(`LT_SCENARIO`는 시나리오별 워크플로가 정한다). 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
 | `TEST_ID` | `run`, `after`, `stop`, `cleanup` | 시험 ID. `run`, `after`는 `plan` 작업의 출력을 받고, `stop`, `cleanup`은 입력을 받아 형식을 검사한다 |
 | `PLANNED_AT` | `run` | `plan` 작업이 계획한 시각(RFC3339). `run`은 이 시각으로 계획을 다시 계산해 `INPUT_JSON`의 `planned_at`에 넣는다 |
 | `AWS_ROLE_ARN` | `plan`(이미지 확인), 나머지 모두 | 맡을 역할. GitHub 비밀 `AWS_BUILD_ROLE_ARN` 또는 `AWS_RUN_ROLE_ARN`에서 받는다. `ACTIONS_ID_TOKEN_REQUEST_URL`이 있을 때만 맡고, 세션이 끝나기 10분 전에 OIDC 토큰을 다시 받아 세션을 바꾼다 |

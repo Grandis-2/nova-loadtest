@@ -102,7 +102,7 @@ func (e Env) readInfra(ctx context.Context, mode infra.Mode, withObs bool) (stri
 	return rtRaw, obsRaw, rt, obs, nil
 }
 
-// Plan 은 loadtest.yml 의 plan 작업이다. 시험 ID 와 계획한 시각을 정하고, 계획 표를 실행 요약에 쓴다.
+// Plan 은 _loadtest.yml 의 plan 작업이다. 시험 ID 와 계획한 시각을 정하고, 계획 표를 실행 요약에 쓴다.
 // 돌려주는 값은 GITHUB_OUTPUT 에 쓸 test_id, planned_at 이다.
 func Plan(e Env, cfg *config.Config) (testID, plannedAt string, err error) {
 	now := e.Clock.Now().Truncate(time.Second)
@@ -111,7 +111,7 @@ func Plan(e Env, cfg *config.Config) (testID, plannedAt string, err error) {
 		return "", "", err
 	}
 	if in.TestID == "" {
-		if in.TestID, err = TestID(now, e.Getenv("GITHUB_RUN_NUMBER")); err != nil {
+		if in.TestID, err = TestID(now, e.Getenv("GITHUB_RUN_ID")); err != nil {
 			return "", "", err
 		}
 	}
@@ -129,7 +129,7 @@ func Plan(e Env, cfg *config.Config) (testID, plannedAt string, err error) {
 	return in.TestID, now.UTC().Format(time.RFC3339), nil
 }
 
-// Run 은 loadtest.yml 의 run 작업이다. 계획을 다시 계산하고, SSM 값을 읽어 가리고, 시험 상품을 점검하고,
+// Run 은 _loadtest.yml 의 run 작업이다. 계획을 다시 계산하고, SSM 값을 읽어 가리고, 시험 상품을 점검하고,
 // 컨트롤러를 띄워 기다린 뒤 결과를 실행 요약과 Slack 에 남긴다. 결과가 성공이 아니면 오류를 돌려준다.
 func Run(ctx context.Context, e Env, cfg *config.Config) error {
 	if err := Guard(e.Getenv); err != nil {
@@ -401,7 +401,7 @@ func Stop(ctx context.Context, e Env, cluster, testID, k6Family string) error {
 	}
 	if len(k6) == 0 {
 		// 아직 k6 를 띄우기 전이다(토큰 발급 중). 컨트롤러까지 멈춰 k6 가 뜨지 않게 한다.
-		// 결과는 남지 않으므로 loadtest.yml 은 판정 불가로 끝나고, 뒷정리가 토큰을 지운다
+		// 결과는 남지 않으므로 시험 워크플로는 판정 불가로 끝나고, 뒷정리가 토큰을 지운다
 		e.printf("k6 태스크가 아직 없다. 컨트롤러와 발급기 %d대를 멈춘다", len(arns))
 		return r.Stop(ctx, arns, "stop.yml(k6 시작 전)")
 	}

@@ -9,9 +9,11 @@ on:
       flows:
         description: 돌릴 흐름(쉼표로 구분, catalog, preorders, entry, order, cancel). 상품 조회만이면 catalog. 비우면 다섯 흐름
       product_id:
-        description: 진입할 시험 상품 ID. flows=catalog 면 비운다
+        description: 진입할 시험 상품 ID. 진입(entry)에 필요하고, prep_product_id 를 비우면 조회, 결제, 취소의 준비 상품도 된다. flows=catalog 면 비운다
       prep_product_id:
         description: 준비 구간에 쓸 시험 상품 ID. 비우면 product_id
+      open_at:
+        description: 회차가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. 비우면 바로 시작한다
       peak_rps:
         description: 흐름 시작 수 합계(초당). 비우면 기본 2.2
       duration:
@@ -44,6 +46,7 @@ jobs:
       flows: ${{ inputs.flows }}
       product_id: ${{ inputs.product_id }}
       prep_product_id: ${{ inputs.prep_product_id }}
+      open_at: ${{ inputs.open_at }}
       peak_rps: ${{ inputs.peak_rps }}
       duration: ${{ inputs.duration }}
       runners: ${{ inputs.runners }}

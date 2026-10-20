@@ -79,6 +79,10 @@ func TestTestID(t *testing.T) {
 	if err := CheckTestID(id); err != nil {
 		t.Fatalf("만든 ID 는 형식 검사를 지나야 한다: %v", err)
 	}
+	// 정리 태스크가 붙이는 두 글자까지 startedBy 36자 안에 들어야 한다
+	if _, err := TestID(time.Now(), "123456789012345678"); err == nil {
+		t.Fatal("34자를 넘는 시험 ID 는 만들지 않아야 한다")
+	}
 	if _, err := TestID(time.Now(), ""); err == nil {
 		t.Fatal("run_id 가 없으면 실패해야 한다")
 	}
@@ -428,7 +432,8 @@ func TestIdle(t *testing.T) {
 }
 
 func TestCheckTestID(t *testing.T) {
-	for id, ok := range map[string]bool{"lt-20261020t0600-1": true, "lt-20261020t0600-": false, "LT-20261020T0600-1": false, "lt-20261020t0600-1/../x": false, "": false} {
+	for id, ok := range map[string]bool{"lt-20261020t0600-1": true, "lt-20261020t0600-": false, "LT-20261020T0600-1": false, "lt-20261020t0600-1/../x": false, "": false,
+		"lt-20261020t0600-12345678901234567": true, "lt-20261020t0600-123456789012345678": false} {
 		if err := CheckTestID(id); (err == nil) != ok {
 			t.Errorf("%q: %v", id, err)
 		}

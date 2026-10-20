@@ -145,24 +145,25 @@ func TestScenarioWorkflows(t *testing.T) {
 				}
 			}
 
-			// 보이는 입력은 이 시나리오가 쓰는 입력이다. 넣었을 때 "쓰지 않는다"로 거절되면 보이지 않아야 한다
+			// 보이는 입력은 이 시나리오가 쓰는 입력이고, 숨긴 입력은 계획이 "쓰지 않는다"로 거절하는 입력이다.
+			// 숨긴 입력을 계획이 받아 쓰면 그 기능을 화면에서 쓸 수 없게 된다
 			now := time.Date(2026, 10, 20, 6, 0, 0, 0, time.UTC)
+			openAt := now.Add(30 * time.Minute).Format(time.RFC3339)
 			base := plan.Input{TestID: "lt-20261020t0600-1", Scenario: name, Now: now,
 				ProductID: "a1b2c3d4-0000-4000-8000-000000000001"}
 			if w.On.Dispatch.Inputs["open_at"].Required {
-				base.OpenAt = now.Add(30 * time.Minute).Format(time.RFC3339)
+				base.OpenAt = openAt
 			}
-			for k := range w.On.Dispatch.Inputs {
+			for k := range common.On.Call.Inputs {
 				in := base
 				switch k {
 				case "prep_product_id":
+					// open_at 을 넣은 spike 도 받도록 다른 상품을 준다
 					in.PrepProductID = "a1b2c3d4-0000-4000-8000-000000000002"
-					if in.OpenAt == "" {
-						in.OpenAt = now.Add(30 * time.Minute).Format(time.RFC3339)
-					}
+					in.OpenAt = openAt
 				case "open_at":
-					in.OpenAt = now.Add(30 * time.Minute).Format(time.RFC3339)
-					if _, ok := w.On.Dispatch.Inputs["prep_product_id"]; ok {
+					in.OpenAt = openAt
+					if name == "spike" {
 						in.PrepProductID = "a1b2c3d4-0000-4000-8000-000000000002"
 					}
 				case "duration":
@@ -172,17 +173,23 @@ func TestScenarioWorkflows(t *testing.T) {
 				case "flows":
 					in.Flows = []string{"entry"}
 				default:
-					continue
+					continue // 모든 시나리오가 쓰거나(scenario, product_id, peak_rps, runners, abort_error_rate) 따로 정한다
 				}
-				_, err := plan.New(cfg, in)
-				if err == nil {
-					continue
-				}
-				// 거절 문구는 "<시나리오>에는 <입력>를 쓰지 않는다" 꼴이다
-				for _, line := range strings.Split(err.Error(), "\n") {
-					if strings.Contains(line, "에는 "+k) && strings.Contains(line, "쓰지 않는다") {
-						t.Errorf("%s 는 이 시나리오에서 쓰지 않는 입력이라 보이지 않아야 한다: %s", k, line)
+				unused := ""
+				if _, err := plan.New(cfg, in); err != nil {
+					// 거절 문구는 "<시나리오>에는 <입력>를 쓰지 않는다" 꼴이다
+					for _, line := range strings.Split(err.Error(), "\n") {
+						if strings.Contains(line, "에는 "+k) && strings.Contains(line, "쓰지 않는다") {
+							unused = line
+						}
 					}
+				}
+				_, shown := w.On.Dispatch.Inputs[k]
+				switch {
+				case shown && unused != "":
+					t.Errorf("%s 는 이 시나리오에서 쓰지 않는 입력이라 보이지 않아야 한다: %s", k, unused)
+				case !shown && unused == "":
+					t.Errorf("%s 는 계획이 받아 쓰는 입력이라 보여야 한다", k)
 				}
 			}
 		})

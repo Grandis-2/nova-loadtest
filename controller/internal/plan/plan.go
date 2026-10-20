@@ -20,6 +20,10 @@ var (
 	testIDRe = regexp.MustCompile(`^lt-[0-9]{8}t[0-9]{4}-[0-9]+$`)
 )
 
+// MaxTestIDLen 은 시험 ID 의 최대 길이다. RunTask startedBy 는 36자까지이고, 정리 컨트롤러(-c)와
+// 정리 태스크(-d)는 시험 ID 뒤에 두 글자를 붙인다
+const MaxTestIDLen = 36 - 2
+
 // Input은 시험 워크플로(loadtest-<시나리오>.yml)의 입력이다. 비어 있는 값은 시나리오 기본값을 쓴다.
 // 워크플로가 컨트롤러에 INPUT_JSON 으로 넘길 때 아래 JSON 이름을 쓴다.
 type Input struct {
@@ -173,8 +177,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if !ok {
 		return nil, fmt.Errorf("시나리오 %q를 모른다(%s 중 하나)", in.Scenario, strings.Join(config.ScenarioOrder, ", "))
 	}
-	if !testIDRe.MatchString(in.TestID) || len(in.TestID) > 36 {
-		fail("시험 ID %q는 lt-<yyyymmddThhmm>-<번호> 형식이고 36자 이하여야 한다", in.TestID)
+	if !testIDRe.MatchString(in.TestID) || len(in.TestID) > MaxTestIDLen {
+		fail("시험 ID %q는 lt-<yyyymmddThhmm>-<번호> 형식이고 %d자 이하여야 한다", in.TestID, MaxTestIDLen)
 	}
 
 	// 흐름. rush는 흐름이 정해져 있다. 몰린 회원 한 명이 진입부터 결제 시도까지 가므로 진입과 주문을 같이 센다

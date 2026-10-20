@@ -6,9 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       product_id:
-        description: 진입할 시험 상품 ID. 진입 흐름(entry)이 있으면 필수, flows 에 없으면 비운다
+        description: 진입할 시험 상품 ID. 진입(entry)에 필요하고, prep_product_id 를 비우면 조회, 결제, 취소의 준비 상품도 된다. flows=catalog 면 비운다
       prep_product_id:
         description: 준비 구간에 쓸 시험 상품 ID. 비우면 product_id
+      open_at:
+        description: 회차가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. 비우면 바로 시작한다
       peak_rps:
         description: 마지막 단계의 흐름 시작 수 합계(초당). 비우면 기본 808
       runners:
@@ -40,6 +42,7 @@ jobs:
       scenario: stress
       product_id: ${{ inputs.product_id }}
       prep_product_id: ${{ inputs.prep_product_id }}
+      open_at: ${{ inputs.open_at }}
       peak_rps: ${{ inputs.peak_rps }}
       runners: ${{ inputs.runners }}
       flows: ${{ inputs.flows }}

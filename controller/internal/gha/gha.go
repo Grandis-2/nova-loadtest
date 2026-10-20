@@ -76,15 +76,19 @@ func TestID(now time.Time, runID string) (string, error) {
 	if err != nil || n <= 0 {
 		return "", fmt.Errorf("GITHUB_RUN_ID %q 가 숫자가 아니다", runID)
 	}
-	return fmt.Sprintf("lt-%st%s-%d", now.UTC().Format("20060102"), now.UTC().Format("1504"), n), nil
+	id := fmt.Sprintf("lt-%st%s-%d", now.UTC().Format("20060102"), now.UTC().Format("1504"), n)
+	if len(id) > plan.MaxTestIDLen {
+		return "", fmt.Errorf("시험 ID %s 가 %d자를 넘는다(GITHUB_RUN_ID 가 너무 길다)", id, plan.MaxTestIDLen)
+	}
+	return id, nil
 }
 
 var testIDPattern = regexp.MustCompile(`^lt-\d{8}t\d{4}-\d+$`)
 
 // CheckTestID 는 손으로 넣은 시험 ID(stop, cleanup 입력)가 형식에 맞는지 본다
 func CheckTestID(id string) error {
-	if !testIDPattern.MatchString(id) || len(id) > 36 {
-		return fmt.Errorf("시험 ID %q 가 lt-<yyyymmdd>t<hhmm>-<번호> 형식이 아니다", id)
+	if !testIDPattern.MatchString(id) || len(id) > plan.MaxTestIDLen {
+		return fmt.Errorf("시험 ID %q 가 lt-<yyyymmdd>t<hhmm>-<번호> 형식이 아니거나 %d자를 넘는다", id, plan.MaxTestIDLen)
 	}
 	return nil
 }

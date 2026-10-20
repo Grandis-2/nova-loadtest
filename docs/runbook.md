@@ -26,7 +26,7 @@
 ### 이미지와 클러스터
 
 - [ ] main의 `build.yml` 마지막 실행이 성공했다(`latest`가 main을 가리킨다). 실패했으면 [build.yml 이 실패했을 때](#buildyml-이-실패했을-때)를 본다
-- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest` 실행 목록에 진행 중인 실행이 없다
+- [ ] 다른 시험이 돌고 있지 않다. Actions의 `loadtest smoke`, `loadtest load`, `loadtest spike`, `loadtest rush`, `loadtest stress`, `loadtest soak` 여섯 워크플로 모두에 진행 중이거나 기다리는 실행이 없다(공통 실행 `_loadtest.yml`은 실행 목록이 따로 없다)
 
 ### 시험 상품
 
@@ -95,18 +95,18 @@ Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(�
 
 | 워크플로 | 보이는 입력 |
 |---|---|
-| `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `peak_rps`, `duration`, `runners`, `abort_error_rate` |
-| `loadtest-load.yml` | `product_id`, `prep_product_id`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `abort_error_rate` |
+| `loadtest-load.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-spike.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 | `loadtest-rush.yml` | `product_id`, `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
-| `loadtest-stress.yml` | `product_id`, `prep_product_id`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-soak.yml` | `product_id`, `prep_product_id`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-stress.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-soak.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
 
 | 입력 | 내용 | 비우면 |
 |---|---|---|
-| `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. spike, rush는 입력 화면에서도 필수다 | |
+| `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. `prep_product_id`를 비우면 조회, 결제, 취소의 준비 상품도 된다(그 흐름이 있으면 둘 중 하나는 넣는다). spike, rush는 입력 화면에서도 필수다 | |
 | `prep_product_id` | 준비 구간 상품. `open_at`을 넣은 spike는 필수, rush는 비운다 | `product_id` |
-| `open_at` | 판매가 열리는 시각(RFC3339). rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다 | |
+| `open_at` | 판매가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다. 그 밖의 시나리오는 비우면 바로 시작한다 | 바로 시작 |
 | `peak_rps` | 흐름 시작 수 합계(초당) | 시나리오 기본값 |
 | `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`) | 시나리오 기본값 |
 | `runners` | k6 태스크 대수. 계산한 값보다 적으면 멈춘다 | 계산한 값 |

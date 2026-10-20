@@ -29,6 +29,8 @@ type preorder struct {
 	ProductID string `json:"productId"`
 	OptionID  string `json:"optionId"`
 	Status    string `json:"status"`
+	// Ready 는 worker 가 등록을 마치는 때다. 그 전에는 PENDING_SYNC 다
+	Ready time.Time `json:"-"`
 }
 
 // notification 은 등록 알림이다. 실제로는 worker 가 등록하고 member 가 저장한 뒤에 보이므로 visible 뒤부터 보인다
@@ -52,8 +54,12 @@ type server struct {
 	seq        int
 }
 
-// notifyDelay 는 접수부터 등록 알림이 보일 때까지의 시간이다
-const notifyDelay = 2 * time.Second
+// 접수부터 등록(과 알림)까지의 시간. 짝수 번째 접수는 화면의 등록 확인(5초) 안에, 홀수 번째는 그 뒤에 등록되어
+// rush 의 두 길(바로 결제, 알림을 기다려 결제)을 모두 지난다
+const (
+	registerFast = 2 * time.Second
+	registerSlow = 8 * time.Second
+)
 
 func main() {
 	s := &server{
@@ -115,9 +121,29 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		s.products(w, r)
 	case "GET /api/v1/products/{id}":
 		id := lastID(r.URL.Path, 0)
-		ok(w, 200, map[string]any{"productId": id, "status": "ACTIVE", "variants": []map[string]any{
-			{"variantId": "11111111-0000-4000-8000-" + id[len(id)-12:], "status": "ACTIVE"},
-		}})
+		ok(w, 200, map[string]any{"productId": id, "status": "ACTIVE", "campaign": map[string]any{"status": "OPEN"},
+			"variants": []map[string]any{{"variantId": "11111111-0000-4000-8000-" + id[len(id)-12:], "status": "ACTIVE"}}})
+	case "GET /api/v1/promotions":
+		items := []map[string]any{}
+		for _, p := range fakePromotions {
+			items = append(items, map[string]any{"promotionId": p.id, "name": p.name, "thumbnailUrl": "https://cdn.example/p.png"})
+		}
+		ok(w, 200, map[string]any{"items": items})
+	case "GET /api/v1/promotions/{id}":
+		id := lastID(r.URL.Path, 0)
+		for _, p := range fakePromotions {
+			if p.id != id {
+				continue
+			}
+			products := []map[string]any{}
+			for _, pid := range p.products {
+				products = append(products, map[string]any{"productId": pid, "saleMode": "PREORDER", "preorderStatus": "OPEN"})
+			}
+			ok(w, 200, map[string]any{"promotionId": id, "name": p.name, "products": products})
+			return
+		}
+		s.violate("unknown_promotion")
+		fail(w, 404, "PROMOTION_NOT_FOUND")
 	case "GET /api/v1/categories":
 		ok(w, 200, map[string]any{"items": categoryTree()})
 	case "GET /api/v1/products/{id}/reviews":
@@ -167,6 +193,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		}
 		q := r.URL.Query()
 		s.mu.Lock()
+		s.register(sub)
 		items := []*preorder{}
 		for _, p := range s.preorders[sub] {
 			if (q.Get("productId") == "" || q.Get("productId") == p.ProductID) && (q.Get("status") == "" || q.Get("status") == p.Status) {
@@ -175,12 +202,6 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		}
 		s.mu.Unlock()
 		ok(w, 200, map[string]any{"items": items, "nextCursor": nil})
-	case "GET /api/v1/preorders/active":
-		if _, good := s.auth(r); !good {
-			fail(w, 401, "UNAUTHENTICATED")
-			return
-		}
-		ok(w, 200, map[string]any{"items": []any{}})
 	case "GET /api/v1/preorders/{id}":
 		sub, good := s.auth(r)
 		if !good {
@@ -190,6 +211,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 		id := lastID(r.URL.Path, 0)
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.register(sub)
 		for _, p := range s.preorders[sub] {
 			if p.ID == id {
 				ok(w, 200, p)
@@ -291,20 +313,34 @@ func (s *server) accept(w http.ResponseWriter, r *http.Request) {
 		s.seq++
 		id = fmt.Sprintf("33333333-0000-4000-8000-%012d", s.seq)
 		s.idem[key] = id
-		// 실제로는 worker가 등록한 뒤 REGISTERED가 된다. 여기서는 바로 등록된 것으로 둔다
-		s.preorders[sub] = append(s.preorders[sub], &preorder{ID: id, ProductID: body.ProductID, OptionID: body.OptionID, Status: "REGISTERED"})
 		now := time.Now()
+		ready := now.Add(registerFast)
+		if s.seq%2 == 1 {
+			ready = now.Add(registerSlow)
+		}
+		s.preorders[sub] = append(s.preorders[sub], &preorder{ID: id, ProductID: body.ProductID, OptionID: body.OptionID,
+			Status: "PENDING_SYNC", Ready: ready})
 		if len(s.notes[sub]) == 0 {
 			// 지난 시험에서 읽지 않고 남은 다른 예약의 알림
 			s.notes[sub] = append(s.notes[sub], notification{ID: fmt.Sprintf("44444444-0000-4000-9000-%012d", s.seq),
 				Target: "stale-" + id, At: now.Add(-time.Hour), Visible: now.Add(-time.Hour)})
 		}
 		s.notes[sub] = append(s.notes[sub], notification{ID: fmt.Sprintf("44444444-0000-4000-8000-%012d", s.seq), Target: id,
-			At: now, Visible: now.Add(notifyDelay)})
+			At: now, Visible: ready})
 	}
 	s.mu.Unlock()
 	w.Header().Set("X-Idempotent-Replay", fmt.Sprint(replay))
 	ok(w, 202, map[string]any{"preorderId": id, "status": "PENDING_SYNC", "replayed": replay})
+}
+
+// fakePromotions 는 지금 보이는 사전예약(홍보)이다. 첫째는 e2e 의 시험 상품(k6/test/e2e.sh product)을, 둘째는
+// 상품 목록의 사전예약 상품 둘을 묶는다
+var fakePromotions = []struct {
+	id, name string
+	products []string
+}{
+	{"66666666-0000-4000-8000-000000000001", "[부하 시험] 사전예약", []string{"a1b2c3d4-0000-4000-8000-000000000001"}},
+	{"66666666-0000-4000-8000-000000000002", "사전예약", []string{"00000000-0000-4000-8000-000000000000", "00000000-0000-4000-8000-000000000002"}},
 }
 
 // fakeProducts 는 상품 목록의 전체 수다. 필터가 없으면 카테고리 목록(size 12)이 세 쪽이 되게 둔다
@@ -383,6 +419,16 @@ func categoryTree() []map[string]any {
 		return map[string]any{"categoryId": categoryID(n), "name": fmt.Sprintf("분류 %d", n), "children": append([]map[string]any{}, children...)}
 	}
 	return []map[string]any{node(1, node(11), node(12)), node(2, node(21)), node(3)}
+}
+
+// register 는 등록을 마칠 때가 지난 예약을 REGISTERED 로 바꾼다. s.mu 를 잡고 부른다
+func (s *server) register(sub string) {
+	now := time.Now()
+	for _, p := range s.preorders[sub] {
+		if p.Status == "PENDING_SYNC" && !now.Before(p.Ready) {
+			p.Status = "REGISTERED"
+		}
+	}
 }
 
 // visible 은 지금 보이는 알림이다. 최신순이다

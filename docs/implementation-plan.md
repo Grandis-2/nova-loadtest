@@ -3,7 +3,7 @@
 어디에 무엇을 만드는지와 작업 단위를 적는다. 무엇을 왜 하는지는 [PLAN.md](../PLAN.md), 규칙과 근거는 [design.md](design.md)에 있다.
 
 - 전제: 시험용 인프라는 아직 없다. 인프라 없이 할 수 있는 것을 먼저 하고, nova-infra PR이 적용되면 이어 붙인다.
-- 기준: be는 main(`4d5863cb`, 2026-10-19)의 컨트롤러와 DTO 코드, nova-infra는 main의 시험 스택(`terraform/aws/loadtest`)을 보고 맞췄다. be의 `contracts/` 문서는 기준으로 쓰지 않는다.
+- 기준: be는 main(`27cbb895`, 2026-10-20)의 컨트롤러와 DTO 코드, nova-infra는 main의 시험 스택(`terraform/aws/loadtest`)을 보고 맞췄다. be의 `contracts/` 문서는 기준으로 쓰지 않는다.
 
 ## 1. 저장소 구성
 
@@ -127,15 +127,16 @@ nova-loadtest/
 - 흐름 하나가 k6 시나리오 하나다. 실행기는 도착률 기반만 쓴다.
 - 모든 요청에 `tags.name`을 경로 템플릿으로 붙인다. `systemTags`는 `status, method, name, scenario, expected_response`다(`url`은 넣지 않는다).
   - 요청은 `lib/http.js`의 함수로만 보낸다. 이 함수는 경로 템플릿과 값을 따로 받아(`req('GET', '/api/v1/products/{id}', {id})`) URL을 만들고, 템플릿을 그대로 `tags.name`에 넣는다. 템플릿이 아래 목록에 없으면 예외를 던진다.
-  - 템플릿 목록(14개, 메서드까지 치면 16가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/products/{id}/reviews`, `/api/v1/preorders/products/{id}/shipment-batches`, `/api/v1/categories`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/active`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`, `/api/v1/notifications`, `/api/v1/notifications/unread-count`. 목록을 늘리면 `scenarios.yml`의 `series.names`도 맞춘다. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
+  - 템플릿 목록(15개, 메서드까지 치면 17가지): `/api/v1/products`, `/api/v1/products/{id}`, `/api/v1/products/{id}/reviews`, `/api/v1/preorders/products/{id}/shipment-batches`, `/api/v1/categories`, `/api/v1/promotions`, `/api/v1/promotions/{id}`, `/api/v1/preorders/queue`, `/api/v1/preorders`, `/api/v1/preorders/{id}`, `/api/v1/preorders/{id}/cancel`, `/api/v1/orders`, `/api/v1/orders/{id}/payment-attempts`, `/api/v1/notifications`, `/api/v1/notifications/unread-count`. 목록을 늘리면 `scenarios.yml`의 `series.names`도 맞춘다. 대기열과 예약 목록은 GET과 POST가 같은 이름을 쓰고 `method` 태그로 갈린다. 쿼리 문자열은 이름에 넣지 않는다.
   - `ci.yml`의 검사: `lib/http.js` 밖에서 `k6/http`를 바로 부르면 실패한다. k6-safety 작업에서 시험용 응답 서버로 흐름을 돌리고, 나온 `name` 값이 모두 목록 안에 있는지 확인한다.
 - `options.userAgent = 'nova-loadtest/' + TEST_ID`로 둔다. `lib/http.js`의 공통 헤더에 `User-Agent`를 넣지 않는다(넣으면 옵션을 덮는다).
 - `handleSummary`는 JSON 요약 하나만 파일로 쓴다. `setup()`은 토큰이나 헤더 값을 반환하지 않는다(요약에 들어간다).
 - `discardResponseBodies: true`로 두고, 본문이 필요한 요청만 `responseType: 'text'`로 받는다.
-- 진입 흐름은 202이면 `Retry-After` 초만큼 `sleep` 한 뒤 다시 확인한다. 확인 응답에 새 `queueToken`이 오면 그 값으로 바꾼다(만료가 가까울 때 서버가 바꿔 준다). 서버가 주는 간격을 그대로 따른다(늦으면 서버가 이탈자로 보고 줄에서 뺀다). 진입부터 접수 응답까지 걸린 시간을 `entry_to_accept` Trend로 남긴다. `new Trend('entry_to_accept', true)`로 만들어 단위를 ms로 맞춘다.
+- 진입 흐름은 202이면 `Retry-After` 초만큼 `sleep` 한 뒤 다시 확인한다. 확인 응답에 새 `queueToken`이 오면 그 값으로 바꾼다(만료가 가까울 때 서버가 바꿔 준다). 서버가 주는 간격을 그대로 따른다(늦으면 서버가 이탈자로 보고 줄에서 뺀다). 진입부터 접수 응답까지 걸린 시간을 `entry_to_accept` Trend로 남긴다. 결과는 `entry_outcome` Counter의 `outcome`으로 센다: `registered`(5초 안에 등록 확인), `accepted`(접수했지만 5초 안에 등록을 못 봤거나 준비 구간이라 묻지 않았다), `accept_failed`, `rejected`, `closed_<reason>`, `poll_limit`. `new Trend('entry_to_accept', true)`로 만들어 단위를 ms로 맞춘다.
 - 진입 시나리오의 `gracefulStop`은 3분이다. 줄에 서 있던 회원이 시험 끝에 잘리지 않게 한다.
-- spike의 몰림 시나리오는 `open_at` + 1초에 시작한다(`startTime`을 컨트롤러가 계산해 `PLAN_JSON`에 넣는다).
-- 결제와 취소 흐름은 `GET /api/v1/preorders?productId=<PREP_PRODUCT_ID>`(결제는 `&status=REGISTERED`)로 예약을 찾는다. `/active`는 상품 필터가 없어 지난 시험의 예약이 섞인다. `CLOSED/NOT_IN_QUEUE`이면 한 번 다시 진입하고, `SALE_CLOSED`이면 끝낸다.
+- 진입 흐름은 사전예약 상세(`GET /api/v1/promotions/{id}`와 첫 상품의 배송 차수)에서 시작하고, 입장한 뒤 상품 상세와 배송 차수를 본 다음 접수한다. 접수한 뒤 `GET /api/v1/preorders/{id}`를 1초마다 최대 5번 물어 등록을 기다린다(준비 구간은 묻지 않는다). `QUEUE_FULL`이면 10초, 503이면 2초 뒤 다시 진입한다. 사전예약 ID는 `setup()`이 사전예약 목록과 상세에서 시험 상품을 찾아 정한다. 찾지 못하면 예외를 던져 시작하지 않는다.
+- spike의 몰림 시나리오는 `open_at` + 1초에 시작한다(`startTime`을 컨트롤러가 계산해 `PLAN_JSON`에 넣는다). `open_at`이 없으면 이미 열린 상품으로 보고 본 시험 시작 + 1초에 시작한다.
+- 결제와 취소 흐름은 `GET /api/v1/preorders?productId=<PREP_PRODUCT_ID>`(결제는 `&status=REGISTERED`)로 예약을 찾는다. `/active`는 상품 필터가 없어 지난 시험의 예약이 섞인다. 화면도 부르지 않으므로 조회 흐름에서도 쓰지 않는다. `CLOSED/NOT_IN_QUEUE`이면 다시 진입하고, `SALE_CLOSED`이면 끝낸다.
 - 접수의 `Idempotency-Key`는 `TEST_ID`와 회원 번호로 만든다. 같은 회원이 다시 보내도 중복 접수가 생기지 않는다.
 - 준비 구간은 `startTime` 0의 별도 시나리오다. 본 시나리오의 `startTime`은 준비 구간 + 등록 대기 시간이다. 컨트롤러가 계산해 `PLAN_JSON`에 넣는다.
 - 결제 흐름은 `REGISTERED` 예약이 없으면 요청을 보내지 않고 `skipped`로 센다. 준비가 늦었는지 결과에서 보인다.
@@ -436,7 +437,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | VU 상한 초과(spike 몰림 2만 명) | 거절 |
 | 시계열 2만 개 초과 | 거절 |
 | `runners`가 계산보다 적음, `max_tasks` 초과 | 거절 |
-| spike에서 `open_at`이 없음, 너무 가까움, `prep_product_id`가 없음 | 거절 |
+| spike에서 `open_at`이 너무 가까움, `open_at`이 있는데 `prep_product_id`가 없거나 `product_id`와 같음 | 거절(`open_at`이 없으면 이미 열린 상품으로 보고 받는다) |
 | `product_id`에 대문자 UUID | 거절(서버가 400을 준다) |
 | 같은 입력 두 번 | 같은 계획(결정적). 러너와 컨트롤러가 같은 값을 낸다 |
 

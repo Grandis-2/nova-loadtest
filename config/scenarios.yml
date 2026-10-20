@@ -10,19 +10,21 @@ flows:
   catalog:
     weight: 80
     pool: none
-    requests: 7.7          # catalog_paths 로 계산한 평균(설정 검사가 맞춰 본다)
+    requests: 7.94         # catalog_paths 로 계산한 평균(설정 검사가 맞춰 본다)
     iteration_seconds: 2
   preorders:
     weight: 10
     pool: b
-    requests: 3            # 예약 목록, /active, 예약 상세
+    requests: 2            # 예약 목록(size 100), 예약 상세. 화면은 /active 를 부르지 않는다
     iteration_seconds: 1
   entry:
     weight: 5
     pool: a
-    requests: 1            # 접수
+    requests: 7            # 사전예약 상세와 배송 차수, 입장 뒤 상품 상세와 배송 차수, 접수, 등록 확인 두 번(추정, 최대 5)
+    admitted_requests: 5   # requests 중 입장한 뒤의 요청. 몰릴 때는 입장 속도를 넘지 않는다
+    register_requests: 2   # requests 중 등록 확인(1초마다). 준비 구간은 따로 기다리므로(register_wait) 보내지 않는다
     queue_requests: 2      # 진입, 순번 확인 한 번(줄이 없을 때)
-    iteration_seconds: 3
+    iteration_seconds: 5   # 등록 확인을 1초마다 기다린다
   order:
     weight: 5
     pool: b
@@ -38,10 +40,12 @@ flows:
 # 홈: 인기 상품(size 10), 카테고리 트리, 대분류 줄마다 목록(기본 size 20)
 # 카테고리 목록과 검색 결과는 size 12, 검색창은 size 8. 정렬(sort)은 화면이 보내지 않아 쓰지 않는다
 # 상품을 누르면 상세와 함께 사전예약은 배송 차수(preorder), 일반 판매는 리뷰(size 100)를 부른다
+# 사전예약 메뉴는 사전예약 목록 → 사전예약 상세(첫 상품의 배송 차수)에서 끝난다. 사전예약 상품은 이 메뉴로만 찾는다
 catalog_paths:
   home_rows: 3             # 모바일, PC/주변기기, 웨어러블
   category: 0.5
   search: 0.3              # 검색창(size 8) → 검색 결과(size 12)
+  preorder: 0.15           # 사전예약 목록 → 사전예약 상세
   next_page: 0.3
   max_pages: 3
   click: 0.7
@@ -57,7 +61,7 @@ waf_limit_per_5m: 2400
 scenarios:
   smoke:
     shape: constant
-    peak_rps: 2.5          # WAF 예외 없이 2분을 돌 수 있는 크기(상품 조회 흐름 하나가 약 7.7건이라 5 면 넘는다)
+    peak_rps: 2.2          # WAF 예외 없이 2분을 돌 수 있는 크기(상품 조회 흐름 하나가 약 7.9건이고 준비 구간 요청이 더해진다)
     duration: 2m
     max_rps: 20
     max_duration: 10m
@@ -152,7 +156,7 @@ members:
 # 시계열 수 계산(시험 하나, Mimir 한도를 지키려고 2만 개 이하로 둔다)
 series:
   limit: 20000
-  names: 16                # tags.name × method 조합
+  names: 17                # tags.name × method 조합(템플릿 15개, 대기열과 예약 목록은 GET, POST 둘)
   statuses_per_name: 3     # 추정
   histogram: 18            # 경계 15 + +Inf 버킷 = 16, 합, 개수
   counters_per_name: 2     # http_reqs, http_req_failed

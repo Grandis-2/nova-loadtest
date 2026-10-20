@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -150,13 +151,7 @@ func Run(ctx context.Context, e Env, cfg *config.Config) error {
 		return err
 	}
 	baseURL := e.Getenv("BASE_URL")
-	entryProduct := ""
-	for _, f := range p.Flows {
-		if f == "entry" {
-			entryProduct = p.ProductID
-		}
-	}
-	if err := Precheck(ctx, e.HTTP, baseURL, p.TestID, entryProduct, p.PrepProductID); err != nil {
+	if err := Precheck(ctx, e.HTTP, baseURL, p.TestID, prechecks(p)...); err != nil {
 		return fmt.Errorf("사전 점검: %w", err)
 	}
 
@@ -468,4 +463,28 @@ func Idle(ctx context.Context, e Env, cluster string) error {
 		return fmt.Errorf("시험 클러스터에 도는 태스크가 %d대 있어 latest 를 옮기지 않는다(커밋 태그는 올렸다). 시험이 끝난 뒤 다시 돌린다", len(arns))
 	}
 	return nil
+}
+
+// prechecks 는 실행 전에 볼 상품과 접수 단계다. 진입 상품은 open_at 이 있으면 그때 열리므로 오픈 전이어도 되고(이미 열렸어도 몰림은
+// 그 시각에 시작한다), 없으면 지금 접수 중이어야 한다. 준비 상품은 준비 구간에 접수하므로 지금 접수 중이어야 한다.
+// 준비 상품이 진입 상품과 같으면 한 번만 보되 지금 접수 중이어야 한다(진입 흐름이 없어도 준비 상품은 본다).
+// 둘 다 사전예약에 묶여 있어야 한다(k6 는 사전예약 상세에서 "예약하기"를 누른다)
+func prechecks(p *plan.Plan) []Want {
+	var out []Want
+	entry := slices.Contains(p.Flows, "entry")
+	if entry {
+		phases := []string{Open}
+		if p.OpenAt != "" {
+			phases = []string{BeforeOpen, Open}
+		}
+		out = append(out, Want{ID: p.ProductID, Phases: phases, Promoted: true})
+	}
+	switch {
+	case p.PrepProductID == "":
+	case entry && p.PrepProductID == p.ProductID:
+		out[0].Phases = []string{Open}
+	default:
+		out = append(out, Want{ID: p.PrepProductID, Phases: []string{Open}, Promoted: true})
+	}
+	return out
 }

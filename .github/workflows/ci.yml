@@ -118,12 +118,15 @@ jobs:
           q=a1b2c3d4-0000-4000-8000-000000000002
           # open_at 은 지금부터 1시간 안이어야 한다(max_open_at_lead). spike 와 rush 만 쓴다
           open_at=$(date -u -d '+30 minutes' +%Y-%m-%dT%H:%M:%SZ)
-          for s in smoke load spike rush stress soak; do
+          # spike-open 은 이미 열린 상품의 spike 다(open_at, prep_product_id 없이)
+          for s in smoke load spike spike-open rush stress soak; do
             extra=""
+            scenario=$s
             [ "$s" = spike ] && extra="-prep-product-id $q -open-at $open_at"
+            [ "$s" = spike-open ] && scenario=spike
             [ "$s" = rush ] && extra="-open-at $open_at"
             # shellcheck disable=SC2086 # extra 는 비거나 인자 두 개 또는 네 개다
-            "$RUNNER_TEMP/plan" -test-id lt-20261020t0630-1 -scenario "$s" -product-id "$p" $extra \
+            "$RUNNER_TEMP/plan" -test-id lt-20261020t0630-1 -scenario "$scenario" -product-id "$p" $extra \
               -json "$RUNNER_TEMP/plan-$s.json"
             docker run --rm -v "$PWD/k6:/k6:ro" -e TEST_ID=lt-20261020t0630-1 -e BASE_URL=http://127.0.0.1:9 \
               -e PLAN_JSON="$(cat "$RUNNER_TEMP/plan-$s.json")" \

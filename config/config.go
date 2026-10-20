@@ -45,16 +45,20 @@ type Flow struct {
 	Weight           float64 `yaml:"weight"`
 	Pool             Pool    `yaml:"pool"`
 	Requests         float64 `yaml:"requests"`
+	AdmittedRequests float64 `yaml:"admitted_requests"` // requests 중 대기열을 지난 뒤의 요청(진입 흐름만)
+	RegisterRequests float64 `yaml:"register_requests"` // admitted_requests 중 1초마다 묻는 등록 확인(진입 흐름만, 준비 구간은 보내지 않는다)
 	QueueRequests    float64 `yaml:"queue_requests"`
 	IterationSeconds float64 `yaml:"iteration_seconds"`
 }
 
 // CatalogPaths는 상품 조회 흐름이 화면을 옮겨 가는 비율이다(프론트 화면 기준, 비율은 추정).
-// 흐름은 홈(인기 상품, 카테고리 트리, 대분류 줄)에서 시작해 카테고리 목록이나 검색으로 가고, 본 목록에서 상품을 누른다
+// 흐름은 홈(인기 상품, 카테고리 트리, 대분류 줄)에서 시작해 카테고리 목록, 검색, 사전예약 메뉴로 가고, 본 목록에서 상품을 누른다.
+// 사전예약 메뉴는 사전예약 상세에서 끝나므로 상품을 누르지 않는다
 type CatalogPaths struct {
 	HomeRows int     `yaml:"home_rows"` // 홈의 대분류 줄 수. 줄마다 목록을 하나씩 부른다
 	Category float64 `yaml:"category"`  // 카테고리 목록으로 가는 비율
 	Search   float64 `yaml:"search"`    // 검색으로 가는 비율. 나머지는 홈에서 끝난다
+	Preorder float64 `yaml:"preorder"`  // 사전예약 메뉴(목록, 상세와 배송 차수)로 가는 비율
 	NextPage float64 `yaml:"next_page"` // 카테고리 목록에서 다음 쪽으로 넘어가는 비율
 	MaxPages int     `yaml:"max_pages"` // 카테고리 목록에서 보는 최대 쪽 수
 	Click    float64 `yaml:"click"`     // 마지막에 본 목록에서 상품을 누르는 비율. 누르면 상세와 배송 차수(사전예약) 또는 리뷰를 부른다
@@ -67,7 +71,7 @@ func (c CatalogPaths) Requests() float64 {
 		p *= c.NextPage
 		pages += p
 	}
-	return 2 + float64(c.HomeRows) + c.Category*pages + c.Search*2 + c.Click*2
+	return 2 + float64(c.HomeRows) + c.Category*pages + c.Search*2 + c.Preorder*3 + (1-c.Preorder)*c.Click*2
 }
 
 // Shape은 시나리오의 부하 모양이다.
@@ -254,15 +258,19 @@ func (c *Config) Validate() error {
 		}
 	}
 	cp := c.CatalogPaths
-	if cp.HomeRows < 0 || cp.MaxPages < 1 || !nonneg(cp.Category, cp.Search, cp.NextPage, cp.Click) ||
-		cp.Category+cp.Search > 1 || cp.NextPage > 1 || cp.Click > 1 {
-		bad("catalog_paths: 비율은 0~1(category + search ≤ 1), home_rows는 0 이상, max_pages는 1 이상이어야 한다")
+	if cp.HomeRows < 0 || cp.MaxPages < 1 || !nonneg(cp.Category, cp.Search, cp.Preorder, cp.NextPage, cp.Click) ||
+		cp.Category+cp.Search+cp.Preorder > 1 || cp.NextPage > 1 || cp.Click > 1 {
+		bad("catalog_paths: 비율은 0~1(category + search + preorder ≤ 1), home_rows는 0 이상, max_pages는 1 이상이어야 한다")
 	} else if want := cp.Requests(); math.Abs(c.Flows["catalog"].Requests-want) > 0.05 {
 		// 계획의 요청 수 계산(태스크 대수, WAF)이 k6가 실제로 보내는 양과 어긋나지 않게 한다
 		bad("flows.catalog.requests %.2f가 catalog_paths로 계산한 %.2f와 다르다", c.Flows["catalog"].Requests, want)
 	}
 	if c.Flows["entry"].Pool != PoolA {
 		bad("flows.entry는 풀 a를 써야 한다")
+	}
+	if e := c.Flows["entry"]; !pos(e.AdmittedRequests) || e.AdmittedRequests > e.Requests || !nonneg(e.RegisterRequests) ||
+		e.RegisterRequests > e.AdmittedRequests || e.RegisterRequests >= e.IterationSeconds {
+		bad("flows.entry: admitted_requests는 0보다 크고 requests 이하, register_requests는 0 이상 admitted_requests 이하이고 iteration_seconds보다 작아야 한다")
 	}
 	if !pos(c.AdmissionRPS, c.EntryCapRPS) || c.EntryCapRPS > c.AdmissionRPS {
 		bad("entry_cap_rps는 0보다 크고 admission_rps 이하여야 한다")

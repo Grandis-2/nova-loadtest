@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,7 @@ import (
 // flowNames 는 흐름마다 반드시 보내는 요청 이름이다(controller/internal/control 의 flowName 과 같다)
 var flowNames = map[string]string{
 	"catalog":   "/api/v1/products",
-	"preorders": "/api/v1/preorders/active",
+	"preorders": "/api/v1/preorders", // 진입의 접수(POST)와 같은 이름이다
 	"entry":     "/api/v1/preorders/queue",
 	"order":     "/api/v1/orders",
 	"cancel":    "/api/v1/preorders/{id}/cancel",
@@ -85,6 +86,13 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 			n := sc.samples(i, relSec-rng, relSec)
 			out = append(out, sample{Metric: map[string]string{instance: strconv.Itoa(i)}, Value: [2]any{ts, fmtFloat(float64(n))}})
 		}
+	case strings.Contains(q, "sum by (scenario)"):
+		// 준비를 뺀 시나리오는 판정 구간 내내 요청을 보낸다
+		for _, k := range p.Scenarios {
+			if k.Flow != "prepare" {
+				out = append(out, sample{Metric: map[string]string{"scenario": k.Name}, Value: [2]any{ts, fmtFloat(float64(rng))}})
+			}
+		}
 	case strings.Contains(q, "sum by (name)"):
 		window := -1
 		for wi, w := range p.Windows {
@@ -95,7 +103,8 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 		rates := map[string]float64{}
 		for _, fr := range p.FlowRates {
 			// 요청 수는 흐름 시작 수 × 흐름 하나의 요청 수다. 판정의 가중 평균이 계획의 흐름 비율대로 나오게 한다
-			rates[flowNames[fr.Flow]] = fr.PeakRPS * s.Config.Flows[fr.Flow].Requests
+			// 이름이 같은 흐름(예약 조회와 진입)은 더한다
+			rates[flowNames[fr.Flow]] += fr.PeakRPS * s.Config.Flows[fr.Flow].Requests
 		}
 		for _, name := range names(p.Flows) {
 			v := 0.0
@@ -127,7 +136,7 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 func names(flows []string) []string {
 	var out []string
 	for _, f := range flows {
-		if n, ok := flowNames[f]; ok {
+		if n, ok := flowNames[f]; ok && !slices.Contains(out, n) {
 			out = append(out, n)
 		}
 	}

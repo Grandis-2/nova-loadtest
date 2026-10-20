@@ -172,6 +172,13 @@ func (m Metrics) Coverage(ctx context.Context, start, end time.Time) (map[string
 	return m.byLabel(ctx, q, end, m.Names.InstanceLabel)
 }
 
+// Scenarios는 구간 [start, end]의 k6 시나리오(scenario)별 요청 수다. 요청 이름은 흐름끼리 겹치므로, 흐름 하나가 통째로
+// 빠졌는지는 시나리오로도 본다
+func (m Metrics) Scenarios(ctx context.Context, start, end time.Time) (map[string]float64, error) {
+	q := fmt.Sprintf(`sum by (scenario) (increase(%s{%s}[%s]))`, m.Names.Reqs, m.sel(""), rng(end.Sub(start)))
+	return m.byLabel(ctx, q, end, "scenario")
+}
+
 func (m Metrics) byLabel(ctx context.Context, q string, at time.Time, label string) (map[string]float64, error) {
 	out, err := m.Q.Query(ctx, q, at)
 	if err != nil {

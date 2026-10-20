@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,9 +28,9 @@ func TestCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	early := spec()
-	early.OpensAt = now.Add(29 * time.Minute)
+	early.OpensAt = now.Add(12 * time.Minute)
 	if err := early.Check(now); err == nil {
-		t.Fatal("30분 안의 오픈은 be 가 거절하므로 미리 막아야 한다")
+		t.Fatal("13분 안의 오픈은 당길 수 없으므로(be 는 10분 뒤부터) 미리 막아야 한다")
 	}
 	closed := spec()
 	closed.ClosesAt = closed.OpensAt
@@ -39,7 +41,7 @@ func TestCheck(t *testing.T) {
 
 // be 는 모르는 칸을 400 으로 거절한다. 계약(ProductRegistrationRequest)에 있는 칸만 보낸다
 func TestBodyFields(t *testing.T) {
-	b := Body(spec())
+	b := Body(spec(), now)
 	allowed := []string{"categoryId", "saleMode", "title", "brand", "modelName", "description", "tags", "visible",
 		"basePrice", "discountRate", "warranty", "optionAxes", "combinations", "images", "campaign", "shipmentBatches"}
 	for k := range b {
@@ -58,7 +60,7 @@ func TestBodyFields(t *testing.T) {
 	}
 	prep := spec()
 	prep.Label = "준비"
-	if got := Body(prep)["title"]; got != "[부하 시험] 무선 이어폰 LT 1020-0640 (준비)" {
+	if got := Body(prep, now)["title"]; got != "[부하 시험] 무선 이어폰 LT 1020-0640 (준비)" {
 		t.Errorf("spike 상품은 쓰임새를 붙인다: %v", got)
 	}
 	if n := len([]rune(b["title"].(string))); n > 100 {
@@ -86,9 +88,14 @@ type fakeAPI struct {
 	token     string
 	polls     int // 등록 상태를 몇 번 물어야 completed 가 되는가
 	reject    bool
+	busy      int // 등록 상태 조회가 처음 몇 번 503 인가(preorder 가 답하지 않는다)
 	keys      []string
 	bodies    []map[string]any
 	statusAsk int
+	campaigns []map[string]any // 회차 당기기 본문
+	images    []string         // 올린 사진의 purpose 와 형식
+	promos    []map[string]any
+	promoKeys []string
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -129,7 +136,36 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 			}})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/admin/products/registrations/"):
 			f.statusAsk++
-			ok(w, 200, map[string]any{"completed": f.statusAsk >= f.polls})
+			if f.statusAsk <= f.busy {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				io.WriteString(w, `{"success":false,"error":{"code":"DEPENDENCY_UNAVAILABLE","message":"잠시 후 다시 시도해 주세요."}}`)
+				return
+			}
+			ok(w, 200, map[string]any{"completed": f.statusAsk >= f.polls+f.busy})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/campaign"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			f.campaigns = append(f.campaigns, body)
+			ok(w, 200, map[string]any{"productId": strings.Split(r.URL.Path, "/")[6], "opensAt": body["opensAt"], "closesAt": body["closesAt"]})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/images":
+			file, hdr, err := r.FormFile("file")
+			if err != nil {
+				t.Errorf("사진 파트 file 이 없다: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			img, format, err := image.Decode(file)
+			if err != nil || img.Bounds().Dx() < 1 {
+				t.Errorf("사진을 읽지 못했다(%s): %v", hdr.Filename, err)
+			}
+			f.images = append(f.images, r.URL.Query().Get("purpose")+"/"+format)
+			ok(w, 201, map[string]any{"imageUrl": "https://cdn.example/promotion/1.png"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/promotions":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			f.promos = append(f.promos, body)
+			f.promoKeys = append(f.promoKeys, r.Header.Get("Idempotency-Key"))
+			ok(w, 201, map[string]any{"promotionId": "0199F0E0-0000-7000-8000-0000000000AA", "status": "ONGOING"})
 		default:
 			t.Errorf("예상하지 않은 요청 %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -141,7 +177,7 @@ func TestCreateAndWait(t *testing.T) {
 	f := &fakeAPI{token: "admin-token", polls: 2}
 	srv := httptest.NewServer(f.handler(t))
 	defer srv.Close()
-	c := &Client{BaseURL: srv.URL, Token: "admin-token", Poll: time.Millisecond}
+	c := &Client{BaseURL: srv.URL, Token: "admin-token", Poll: time.Millisecond, Now: func() time.Time { return now }}
 	ctx := context.Background()
 
 	cat, err := c.Category(ctx)
@@ -304,3 +340,89 @@ func TestNoTokenOverHTTP(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// 원하는 오픈이 30분 안이면 30분 뒤로 등록하고, 준비가 끝난 뒤 회차를 당긴다. 일시 장애(503)는 다시 묻는다
+func TestRegisterThenReschedule(t *testing.T) {
+	f := &fakeAPI{token: "admin-token", polls: 1, busy: 2}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "admin-token", Poll: time.Millisecond, Now: func() time.Time { return now }}
+	ctx := context.Background()
+	s := spec()
+	s.OpensAt = now.Add(15 * time.Minute)
+	p, err := c.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := f.bodies[0]["campaign"].(map[string]any)["opensAt"]
+	if reg != "2026-10-20T06:32:00Z" {
+		t.Errorf("등록 오픈은 지금 + 31분 뒤의 다음 분이어야 한다: %v", reg)
+	}
+	if err := c.WaitReady(ctx, &p, time.Second); err != nil {
+		t.Fatalf("503 은 다시 물어야 한다: %v", err)
+	}
+	if err := c.Reschedule(ctx, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.campaigns) != 1 || f.campaigns[0]["opensAt"] != "2026-10-20T06:15:00Z" || f.campaigns[0]["closesAt"] != "2026-10-20T18:00:00Z" {
+		t.Errorf("회차 당기기 본문 %v", f.campaigns)
+	}
+	if !p.OpensAt.Equal(now.Add(15 * time.Minute)) {
+		t.Errorf("당긴 오픈을 기억해야 한다: %s", p.OpensAt)
+	}
+
+	// 이미 원하는 오픈이면 당기지 않는다
+	if err := c.Reschedule(ctx, &p); err != nil || len(f.campaigns) != 1 {
+		t.Errorf("다시 당기지 않아야 한다: %v %d", err, len(f.campaigns))
+	}
+	// 당길 시간이 지났으면 등록한 오픈을 그대로 두고 알린다
+	late := Product{ID: "x", OpensAt: now.Add(31 * time.Minute), Want: now.Add(10 * time.Minute), ClosesAt: now.Add(time.Hour)}
+	if err := c.Reschedule(ctx, &late); err == nil || !late.OpensAt.Equal(now.Add(31*time.Minute)) {
+		t.Errorf("10분 30초 안은 당기지 않아야 한다: %v %s", err, late.OpensAt)
+	}
+}
+
+// 만든 상품을 홍보 하나에 묶는다. 사진은 PROMOTION 으로 새로 올리고, 기간은 오늘(한국 날짜)부터 가장 늦은 마감 날짜까지다
+func TestCreatePromotion(t *testing.T) {
+	f := &fakeAPI{token: "admin-token"}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "admin-token", Poll: time.Millisecond, Now: func() time.Time { return now }}
+	ps := []Product{
+		{ID: "p1", Want: now.Add(15 * time.Minute), ClosesAt: now.Add(12 * time.Hour)},
+		{ID: "p2", Want: now.Add(35 * time.Minute), ClosesAt: now.Add(20 * time.Hour)},
+	}
+	promo, err := c.CreatePromotion(context.Background(), ps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promo.ID != "0199f0e0-0000-7000-8000-0000000000aa" {
+		t.Errorf("홍보 ID 는 소문자로: %s", promo.ID)
+	}
+	if len(f.images) != 1 || f.images[0] != "PROMOTION/png" {
+		t.Errorf("홍보 사진은 purpose=PROMOTION 의 PNG 하나다: %v", f.images)
+	}
+	b := f.promos[0]
+	allowed := []string{"name", "startDate", "endDate", "thumbnailUrl", "detailImageUrls", "productIds"}
+	for k := range b {
+		if !slices.Contains(allowed, k) {
+			t.Errorf("계약에 없는 칸 %q", k)
+		}
+	}
+	// 지금은 KST 15:00 이고, 늦은 마감은 UTC 2026-10-21 02:00 = KST 11:00 이다
+	if b["startDate"] != "2026-10-20" || b["endDate"] != "2026-10-21" || promo.EndDate != "2026-10-21" {
+		t.Errorf("홍보 기간 %v ~ %v", b["startDate"], b["endDate"])
+	}
+	if ids := fmt.Sprint(b["productIds"]); ids != "[p1 p2]" {
+		t.Errorf("묶은 상품 %s", ids)
+	}
+	if b["thumbnailUrl"] != "https://cdn.example/promotion/1.png" {
+		t.Errorf("썸네일은 올린 사진이어야 한다: %v", b["thumbnailUrl"])
+	}
+	if n := len([]rune(b["name"].(string))); n > 100 {
+		t.Errorf("홍보 이름 %d자는 100자를 넘는다", n)
+	}
+	if !strings.HasPrefix(f.promoKeys[0], "loadtest-") {
+		t.Errorf("홍보 만들기에 멱등 키가 있어야 한다: %q", f.promoKeys[0])
+	}
+}

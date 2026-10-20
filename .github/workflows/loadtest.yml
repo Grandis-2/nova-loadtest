@@ -14,9 +14,9 @@ on:
         description: 진입할 시험 상품 ID
         required: true
       prep_product_id:
-        description: 준비 구간에 쓸 시험 상품 ID(spike 는 필수, rush 는 비운다, 그 밖에는 비우면 product_id)
+        description: 준비 구간에 쓸 시험 상품 ID(open_at 을 넣은 spike 는 필수, rush 는 비운다, 그 밖에는 비우면 product_id)
       open_at:
-        description: 판매가 열리는 시각(RFC3339, spike 와 rush 만)
+        description: 판매가 열리는 시각(RFC3339). rush 는 필수, spike 는 비우면 이미 열린 상품으로 보고 바로 몰린다
       peak_rps:
         description: 흐름 시작 수 합계(초당). 비우면 시나리오 기본값
       duration:

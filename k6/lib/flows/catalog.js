@@ -1,15 +1,18 @@
-// 상품 조회. 토큰이 필요 없다. 프론트(fe f57397b)의 화면이 부르는 순서를 따른다. 비율은 PLAN.catalog(scenarios.yml catalog_paths)다.
+// 상품 조회. 토큰이 필요 없다. 프론트(fe b406737)의 화면이 부르는 순서를 따른다. 비율은 PLAN.catalog(scenarios.yml catalog_paths)다.
 //
 // - 홈: 인기 상품 ?size=10, 카테고리 트리, 대분류 줄마다 ?categoryId=(기본 size 20)
 // - 카테고리 목록 ?categoryId=&page=&size=12. 쪽 번호를 눌러 넘긴다. hasNext 가 false 면 더 넘기지 않는다
 // - 검색창 ?q=&size=8 → 검색 결과 ?q=&size=12
+// - 사전예약 메뉴: 사전예약 목록 GET /api/v1/promotions → 사전예약 상세(첫 사전예약 상품의 배송 차수). 모델을 눌러
+//   "예약하기"는 로그인이 필요하므로 여기서 끝난다(접수는 진입 흐름이 한다). 지금 보이는 사전예약이 없으면 목록에서 끝난다
 // - 상품을 누르면 상세와 함께, 사전예약은 배송 차수(preorder), 일반 판매는 리뷰 ?page=0&size=100 을 부른다
-// 정렬(sort)은 화면이 보내지 않아 쓰지 않는다. be catalog ProductController, ReviewController,
-// preorder ProductShipmentBatchController (94b27657)
+// 정렬(sort)은 화면이 보내지 않아 쓰지 않는다. be catalog ProductController, PromotionController, ReviewController,
+// preorder ProductShipmentBatchController (27cbb895)
 import { PLAN } from '../config.js';
 import { data, req } from '../http.js';
+import { productScreen, promotionScreen } from './screens.js';
 
-const P = PLAN.catalog || { home_rows: 0, category: 0, search: 0, next_page: 0, max_pages: 1, click: 0 };
+const P = PLAN.catalog || { home_rows: 0, category: 0, search: 0, preorder: 0, next_page: 0, max_pages: 1, click: 0 };
 const LIST = '/api/v1/products';
 
 function pick(xs) {
@@ -36,12 +39,11 @@ function search(keyword) {
   return list({ q: keyword, size: 12 }).items;
 }
 
-function openProduct(product) {
-  req('GET', '/api/v1/products/{id}', { path: { id: product.productId } });
-  if (product.saleMode === 'PREORDER') {
-    req('GET', '/api/v1/preorders/products/{id}/shipment-batches', { path: { id: product.productId } });
-  } else {
-    req('GET', '/api/v1/products/{id}/reviews', { path: { id: product.productId }, query: { page: 0, size: 100 } });
+function preorderMenu() {
+  const promos = data(req('GET', '/api/v1/promotions', { needBody: true }));
+  const items = (promos && promos.items) || [];
+  if (items.length > 0) {
+    promotionScreen(pick(items).promotionId);
   }
 }
 
@@ -61,10 +63,15 @@ export function catalogFlow(setup) {
     shown = categoryPages(pick(categories.all));
   } else if (r >= P.category && r < P.category + P.search && keywords.length > 0) {
     shown = search(pick(keywords));
+  } else if (r >= P.category + P.search && r < P.category + P.search + P.preorder) {
+    // 사전예약 상세에서 끝난다. 상품 목록을 보지 않았으므로 누를 상품이 없다
+    preorderMenu();
+    return;
   }
 
   if (shown.length > 0 && Math.random() < P.click) {
-    openProduct(pick(shown));
+    const p = pick(shown);
+    productScreen(p.productId, p.saleMode);
   }
 }
 

@@ -130,6 +130,7 @@ type CatalogPaths struct {
 	HomeRows int     `json:"home_rows"`
 	Category float64 `json:"category"`
 	Search   float64 `json:"search"`
+	Preorder float64 `json:"preorder"`
 	NextPage float64 `json:"next_page"`
 	MaxPages int     `json:"max_pages"`
 	Click    float64 `json:"click"`
@@ -283,11 +284,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		if !has("entry") {
 			fail("spike에는 진입 흐름이 있어야 한다")
 		}
-		if in.OpenAt == "" {
-			fail("spike에는 open_at이 필요하다")
-		}
-		if needPrep && (in.PrepProductID == "" || in.PrepProductID == in.ProductID) {
-			fail("spike에는 product_id와 다른 prep_product_id가 필요하다(같은 상품이면 준비 구간이 SALE_NOT_OPEN으로 막힌다)")
+		// open_at 이 없으면 이미 열린 상품으로 보고 준비 구간이 끝나는 대로 몰림을 시작한다. 그때는 준비 구간도
+		// 같은 상품에 접수할 수 있다(준비 회원은 풀 B, C 라 몰림의 풀 A 와 겹치지 않는다)
+		if needPrep && in.OpenAt != "" && (in.PrepProductID == "" || in.PrepProductID == in.ProductID) {
+			fail("open_at을 넣은 spike에는 product_id와 다른 prep_product_id가 필요하다(진입 상품은 아직 열리지 않아 준비 구간이 SALE_NOT_OPEN으로 막힌다). " +
+				"이미 열린 상품이면 open_at을 비운다")
 		}
 	}
 	var openAt time.Time
@@ -317,7 +318,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 	if has("catalog") {
 		c := cfg.CatalogPaths
-		p.Catalog = &CatalogPaths{HomeRows: c.HomeRows, Category: c.Category, Search: c.Search, NextPage: c.NextPage,
+		p.Catalog = &CatalogPaths{HomeRows: c.HomeRows, Category: c.Category, Search: c.Search, Preorder: c.Preorder, NextPage: c.NextPage,
 			MaxPages: c.MaxPages, Click: c.Click}
 	}
 	if !openAt.IsZero() {
@@ -475,8 +476,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		waiting := math.Max(0, (peak-cfg.AdmissionRPS)*float64(burstS))
 		burst := phase{rates: clone(bg), extraQ: waiting / cfg.PollIntervalSeconds}
 		burst.rates["entry"] = peak
-		// 접수는 입장한 회원만 보내므로 입장 속도를 넘지 않는다. rates의 진입(peak)으로 센 접수를 그만큼 줄인다
-		burst.extraW = (math.Min(peak, cfg.AdmissionRPS) - peak) * cfg.Flows["entry"].Requests
+		// 입장한 뒤의 요청(상품 상세, 접수, 등록 확인)은 입장 속도를 넘지 않는다. rates의 진입(peak)으로 센 만큼을 줄인다
+		burst.extraW = (math.Min(peak, cfg.AdmissionRPS) - peak) * cfg.Flows["entry"].AdmittedRequests
 		observe := phase{rates: clone(bg)}
 		observe.rates["entry"] = observeRPS
 		phases = append(phases, burst, observe)
@@ -533,10 +534,10 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		peak = quant(peak)
 		admitted := math.Min(peak, cfg.AdmissionRPS)
 		waiting := math.Max(0, (peak-cfg.AdmissionRPS)*float64(burstS))
-		// 몰림: 진입 전에 상품 상세를 한 번 보고(WAF 요청 1건), 접수는 입장 속도를 넘지 않는다
+		// 몰림: 진입 전 요청(사전예약 상세)은 몰린 만큼, 입장한 뒤의 요청은 입장 속도만큼이다
 		burst := phase{rates: clone(bg), extraQ: waiting / cfg.PollIntervalSeconds}
 		burst.rates["entry"] = peak
-		burst.extraW = peak + (admitted-peak)*cfg.Flows["entry"].Requests
+		burst.extraW = (admitted - peak) * cfg.Flows["entry"].AdmittedRequests
 		if r.PayRatio > 0 {
 			// 결제: 접수한 순서(입장 속도)대로 등록 알림을 받는다고 본다. 입장이 이어지는 동안 앞쪽 회원의 결제가
 			// 시작되므로 몰림과 같은 구간에 더하고, 알림 수 확인은 결제할 회원이 모두 함께 기다리는 경우로 크게 잡는다
@@ -573,7 +574,9 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	mainStart := prepS + waitS
 	if prepS > 0 {
 		prepRate := quant(math.Min(cfg.Members.PrepRPS, float64(poolB+poolC)/float64(prepS)))
-		addConstant("prepare", "prepare", prepRate, 0, prepS, prepRate*cfg.Flows["entry"].IterationSeconds)
+		// 준비는 등록 확인(1초마다)을 기다리지 않는다
+		e := cfg.Flows["entry"]
+		addConstant("prepare", "prepare", prepRate, 0, prepS, prepRate*(e.IterationSeconds-e.RegisterRequests))
 		phases = append(phases, phase{rates: map[string]float64{"entry": prepRate}, prep: true})
 	}
 	build(mainStart)
@@ -656,7 +659,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	// WAF 예외 없이 도는 시나리오: 태스크(IP) 하나가 5분 동안 보내는 요청
 	// 5분 창은 두 경우 중 큰 쪽이다. 본 시험 안의 5분, 또는 준비 구간 끝을 품는 5분(준비 요청 + 등록 대기 뒤에 남는
 	// 본 시험 앞부분)이다. 준비는 등록 대기보다 앞에서 끝나므로 본 시험 5분 창에 통째로 더하지 않는다
-	prepReq := float64(poolB+poolC) * cfg.Flows["entry"].Requests
+	prepReq := float64(poolB+poolC) * (cfg.Flows["entry"].Requests - cfg.Flows["entry"].RegisterRequests)
 	mainWin := peakWAF * math.Min(300, float64(mainLen))
 	prepWin := prepReq + peakWAF*math.Max(0, math.Min(float64(mainLen), float64(300-waitS)))
 	waf := math.Max(mainWin, prepWin) / float64(tasks)

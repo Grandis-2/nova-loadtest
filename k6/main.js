@@ -8,6 +8,7 @@ import { entryFlow, prepareFlow } from './lib/flows/entry_flows.js';
 import { orderFlow } from './lib/flows/order.js';
 import { preordersFlow } from './lib/flows/preorders.js';
 import { rushFlow } from './lib/flows/rush.js';
+import { promotionSetup } from './lib/flows/screens.js';
 
 function scenarios() {
   const out = {};
@@ -52,10 +53,23 @@ export function setup() {
   const flows = new Set(PLAN.flows);
   const list = data(req('GET', '/api/v1/products', { query: { page: 0, size: 100 }, needBody: true }));
   const products = (list && list.items) || [];
+  // 진입(준비 포함)만 사전예약 상세에서 시작한다
+  const promos = flows.has('entry') || PLAN.prep_product_id ? promotionSetup() : { promotionOf: {} };
   return Object.assign(flows.has('catalog') ? catalogSetup(products) : {}, {
     optionId: flows.has('entry') ? activeOption(PRODUCT_ID) : null,
     prepOptionId: PLAN.prep_product_id ? activeOption(PREP_PRODUCT_ID) : null,
+    promotionId: flows.has('entry') ? promotionOf(promos, PRODUCT_ID) : null,
+    prepPromotionId: PLAN.prep_product_id ? promotionOf(promos, PREP_PRODUCT_ID) : null,
   });
+}
+
+// 시험 상품이 묶인 사전예약(홍보). 고객은 사전예약 상세에서만 "예약하기"를 누를 수 있으므로, 묶이지 않았으면 시작하지 않는다
+function promotionOf(promos, productId) {
+  const id = promos.promotionOf[String(productId).toLowerCase()];
+  if (!id) {
+    throw new Error(`시험 상품 ${productId}이 지금 보이는 사전예약(홍보)에 묶여 있지 않다. testproduct 로 만들거나 관리자 화면에서 묶는다`);
+  }
+  return id;
 }
 
 export function catalog(setupData) {

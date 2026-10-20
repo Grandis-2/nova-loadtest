@@ -49,6 +49,27 @@ type Flow struct {
 	IterationSeconds float64 `yaml:"iteration_seconds"`
 }
 
+// CatalogPaths는 상품 조회 흐름이 화면을 옮겨 가는 비율이다(프론트 화면 기준, 비율은 추정).
+// 흐름은 홈(인기 상품, 카테고리 트리, 대분류 줄)에서 시작해 카테고리 목록이나 검색으로 가고, 본 목록에서 상품을 누른다
+type CatalogPaths struct {
+	HomeRows int     `yaml:"home_rows"` // 홈의 대분류 줄 수. 줄마다 목록을 하나씩 부른다
+	Category float64 `yaml:"category"`  // 카테고리 목록으로 가는 비율
+	Search   float64 `yaml:"search"`    // 검색으로 가는 비율. 나머지는 홈에서 끝난다
+	NextPage float64 `yaml:"next_page"` // 카테고리 목록에서 다음 쪽으로 넘어가는 비율
+	MaxPages int     `yaml:"max_pages"` // 카테고리 목록에서 보는 최대 쪽 수
+	Click    float64 `yaml:"click"`     // 마지막에 본 목록에서 상품을 누르는 비율. 누르면 상세와 배송 차수(사전예약) 또는 리뷰를 부른다
+}
+
+// Requests는 이 비율로 흐름 하나가 보내는 평균 요청 수다. 다음 쪽이 늘 있다고 보고 크게 잡는다
+func (c CatalogPaths) Requests() float64 {
+	pages, p := 1.0, 1.0
+	for range c.MaxPages - 1 {
+		p *= c.NextPage
+		pages += p
+	}
+	return 2 + float64(c.HomeRows) + c.Category*pages + c.Search*2 + c.Click*2
+}
+
 // Shape은 시나리오의 부하 모양이다.
 type Shape string
 
@@ -147,6 +168,7 @@ type Metrics struct {
 
 type Config struct {
 	Flows               map[string]Flow     `yaml:"flows"`
+	CatalogPaths        CatalogPaths        `yaml:"catalog_paths"`
 	AdmissionRPS        float64             `yaml:"admission_rps"`
 	EntryCapRPS         float64             `yaml:"entry_cap_rps"`
 	PollIntervalSeconds float64             `yaml:"poll_interval_seconds"`
@@ -230,6 +252,14 @@ func (c *Config) Validate() error {
 		default:
 			bad("flows.%s.pool %q는 none, a, b, c 중 하나여야 한다", name, f.Pool)
 		}
+	}
+	cp := c.CatalogPaths
+	if cp.HomeRows < 0 || cp.MaxPages < 1 || !nonneg(cp.Category, cp.Search, cp.NextPage, cp.Click) ||
+		cp.Category+cp.Search > 1 || cp.NextPage > 1 || cp.Click > 1 {
+		bad("catalog_paths: 비율은 0~1(category + search ≤ 1), home_rows는 0 이상, max_pages는 1 이상이어야 한다")
+	} else if want := cp.Requests(); math.Abs(c.Flows["catalog"].Requests-want) > 0.05 {
+		// 계획의 요청 수 계산(태스크 대수, WAF)이 k6가 실제로 보내는 양과 어긋나지 않게 한다
+		bad("flows.catalog.requests %.2f가 catalog_paths로 계산한 %.2f와 다르다", c.Flows["catalog"].Requests, want)
 	}
 	if c.Flows["entry"].Pool != PoolA {
 		bad("flows.entry는 풀 a를 써야 한다")

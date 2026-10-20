@@ -175,7 +175,7 @@ func TestSeriesLimit(t *testing.T) {
 
 func TestWAFLimit(t *testing.T) {
 	c := cfg(t)
-	c.Flows["catalog"] = config.Flow{Weight: 80, Pool: config.PoolNone, Requests: 6, IterationSeconds: 1}
+	c.Flows["catalog"] = config.Flow{Weight: 80, Pool: config.PoolNone, Requests: 15, IterationSeconds: 2} // 기본(7.7건)의 두 배 가까이
 	mustReject(t, c, input("smoke"), "WAF")
 }
 

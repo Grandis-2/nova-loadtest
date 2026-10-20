@@ -111,18 +111,21 @@ func routeOf(method, path string) string {
 func (s *server) handle(w http.ResponseWriter, r *http.Request, route string) {
 	switch route {
 	case "GET /api/v1/products":
-		items := []map[string]any{}
-		for i := 1; i <= 5; i++ {
-			items = append(items, map[string]any{"productId": fmt.Sprintf("00000000-0000-4000-8000-%012d", i), "status": "ACTIVE"})
-		}
-		ok(w, 200, map[string]any{"page": 0, "size": 20, "total": 5, "hasNext": false, "items": items})
+		s.products(w, r)
 	case "GET /api/v1/products/{id}":
 		id := lastID(r.URL.Path, 0)
 		ok(w, 200, map[string]any{"productId": id, "status": "ACTIVE", "variants": []map[string]any{
 			{"variantId": "11111111-0000-4000-8000-" + id[len(id)-12:], "status": "ACTIVE"},
 		}})
 	case "GET /api/v1/categories":
-		ok(w, 200, map[string]any{"items": []map[string]any{{"categoryId": "c1", "name": "스마트폰"}}})
+		ok(w, 200, map[string]any{"items": categoryTree()})
+	case "GET /api/v1/products/{id}/reviews":
+		if q := r.URL.Query(); q.Get("page") != "0" || q.Get("size") != "100" {
+			s.violate("reviews_query")
+		}
+		ok(w, 200, map[string]any{"page": 0, "size": 100, "total": 0, "hasNext": false, "items": []any{}})
+	case "GET /api/v1/preorders/products/{id}/shipment-batches":
+		ok(w, 200, map[string]any{"items": []map[string]any{{"batchNumber": 1, "positionFrom": 1, "positionTo": nil}}})
 	case "POST /api/v1/preorders/queue":
 		sub, good := s.auth(r)
 		if !good {
@@ -301,6 +304,47 @@ func (s *server) accept(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	w.Header().Set("X-Idempotent-Replay", fmt.Sprint(replay))
 	ok(w, 202, map[string]any{"preorderId": id, "status": "PENDING_SYNC", "replayed": replay})
+}
+
+// fakeProducts 는 상품 목록의 전체 수다. 카테고리 목록(size 12)이 세 쪽이 되게 둔다
+const fakeProducts = 30
+
+// products 는 상품 목록이다. 짝수 번째는 사전예약, 홀수 번째는 일반 판매다. 화면이 보내지 않는 정렬(sort)과 범위를 벗어난 쪽은 위반으로 센다
+func (s *server) products(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	size, page := 20, 0
+	if v := q.Get("size"); v != "" {
+		fmt.Sscan(v, &size)
+	}
+	if v := q.Get("page"); v != "" {
+		fmt.Sscan(v, &page)
+	}
+	if size < 1 || size > 100 || page < 0 || page*size >= 10000 || q.Has("sort") {
+		s.violate("products_query")
+		fail(w, 400, "VALIDATION_FAILED")
+		return
+	}
+	if id := q.Get("categoryId"); id != "" && !uuidRe.MatchString(id) {
+		s.violate("products_category")
+	}
+	items := []map[string]any{}
+	for i := page*size + 1; i <= min(fakeProducts, (page+1)*size); i++ {
+		mode := "NORMAL"
+		if i%2 == 0 {
+			mode = "PREORDER"
+		}
+		items = append(items, map[string]any{"productId": fmt.Sprintf("00000000-0000-4000-8000-%012d", i), "saleMode": mode,
+			"title": fmt.Sprintf("무선 이어폰 %d", i), "modelName": fmt.Sprintf("LT-%d", i), "status": "ACTIVE"})
+	}
+	ok(w, 200, map[string]any{"page": page, "size": size, "total": fakeProducts, "hasNext": (page+1)*size < fakeProducts, "items": items})
+}
+
+func categoryTree() []map[string]any {
+	node := func(n int, children ...map[string]any) map[string]any {
+		return map[string]any{"categoryId": fmt.Sprintf("55555555-0000-4000-8000-%012d", n), "name": fmt.Sprintf("분류 %d", n),
+			"children": append([]map[string]any{}, children...)}
+	}
+	return []map[string]any{node(1, node(11), node(12)), node(2, node(21)), node(3)}
 }
 
 // visible 은 지금 보이는 알림이다. 최신순이다

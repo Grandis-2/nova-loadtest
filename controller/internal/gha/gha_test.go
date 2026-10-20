@@ -72,12 +72,15 @@ func TestGuard(t *testing.T) {
 }
 
 func TestTestID(t *testing.T) {
-	id, err := TestID(time.Date(2026, 10, 20, 6, 30, 59, 0, time.FixedZone("KST", 9*3600)), "12")
-	if err != nil || id != "lt-20261019t2130-12" {
+	id, err := TestID(time.Date(2026, 10, 20, 6, 30, 59, 0, time.FixedZone("KST", 9*3600)), "18712345678")
+	if err != nil || id != "lt-20261019t2130-18712345678" {
 		t.Fatalf("UTC 로 만든다: %s %v", id, err)
 	}
+	if err := CheckTestID(id); err != nil {
+		t.Fatalf("만든 ID 는 형식 검사를 지나야 한다: %v", err)
+	}
 	if _, err := TestID(time.Now(), ""); err == nil {
-		t.Fatal("run_number 가 없으면 실패해야 한다")
+		t.Fatal("run_id 가 없으면 실패해야 한다")
 	}
 }
 
@@ -395,7 +398,7 @@ func TestCleanupRefusedWithoutDataTask(t *testing.T) {
 func TestPlanOutputs(t *testing.T) {
 	f := newRun(t, "")
 	f.vars["TEST_ID"] = ""
-	f.vars["GITHUB_RUN_NUMBER"] = "7"
+	f.vars["GITHUB_RUN_ID"] = "7"
 	id, at, err := Plan(f.env, cfg(t))
 	if err != nil || id != "lt-20261020t0600-7" || at != "2026-10-20T06:00:00Z" {
 		t.Fatalf("%s %s %v", id, at, err)

@@ -1,40 +1,37 @@
-name: loadtest
+name: loadtest (공통)
 
-# 수동 실행: 입력 확인(plan) → 승인(environment loadtest) → 사전 점검, 컨트롤러, 결과 정리, 뒷정리(run)
+# 시나리오별 워크플로(loadtest-<시나리오>.yml)가 부르는 공통 실행이다. 직접 실행하지 않는다.
+# 입력 확인(plan) → 승인(environment loadtest) → 사전 점검, 컨트롤러, 결과 정리, 뒷정리(run)
 # 사전 점검부터 뒷정리까지 한 작업에 두는 까닭은 docs/design.md "실행"에 있다.
+# GitHub 의 입력 화면은 조건부 입력이 없어서, 시나리오마다 쓰는 입력만 보이게 부르는 쪽을 나눴다.
+# 입력은 모두 문자열이고, 비우면 시나리오 기본값이다. 뜻은 부르는 쪽의 입력 설명에 있다.
+#
+# 같은 시간에는 시험을 하나만 돌린다. concurrency 는 부르는 쪽에 둔다(여기에도 같은 그룹을 두면
+# 부르는 실행이 그룹을 잡고 있어 GitHub 이 교착으로 보고 실행을 취소한다).
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       scenario:
-        description: 시나리오
-        type: choice
-        options: [smoke, load, spike, rush, stress, soak]
-        default: smoke
-      product_id:
-        description: 진입할 시험 상품 ID
+        type: string
         required: true
+      product_id:
+        type: string
       prep_product_id:
-        description: 준비 구간에 쓸 시험 상품 ID(open_at 을 넣은 spike 는 필수, rush 는 비운다, 그 밖에는 비우면 product_id)
+        type: string
       open_at:
-        description: 판매가 열리는 시각(RFC3339). rush 는 필수, spike 는 비우면 이미 열린 상품으로 보고 바로 몰린다
+        type: string
       peak_rps:
-        description: 흐름 시작 수 합계(초당). 비우면 시나리오 기본값
+        type: string
       duration:
-        description: 유지 시간(예 10m). 비우면 시나리오 기본값
+        type: string
       ramp_up:
-        description: 올리는 시간(예 2m). 비우면 시나리오 기본값
+        type: string
       runners:
-        description: k6 태스크 대수. 비우면 계산한 값
+        type: string
       flows:
-        description: 돌릴 흐름(쉼표로 구분). 비우면 시나리오 기본값
+        type: string
       abort_error_rate:
-        description: 중단할 오류율(%, 0보다 크고 50 이하. 5 는 5%). 비우면 기본값 5
-
-# 같은 시간에는 시험을 하나만 돌리고, 진행 중인 시험은 취소하지 않는다.
-# 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라 시험 중에 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook).
-concurrency:
-  group: loadtest
-  cancel-in-progress: false
+        type: string
 
 permissions:
   contents: read

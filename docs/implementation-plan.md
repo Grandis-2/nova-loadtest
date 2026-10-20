@@ -14,7 +14,8 @@ nova-loadtest/
 │   └── workflows/
 │       ├── ci.yml               PR, main push: actionlint, 워크플로 규칙, 린트, 단위 테스트, k6 inspect, 이미지 빌드(푸시 없음), k6-safety
 │       ├── build.yml            main push: 이미지 3개 → ECR (커밋 해시, latest)
-│       ├── loadtest.yml         수동: 입력 확인 → 승인 → 컨트롤러 → 결과 → 뒷정리
+│       ├── loadtest-<시나리오>.yml  수동: 시나리오마다 쓰는 입력만 받아 _loadtest.yml 을 부른다(smoke, load, spike, rush, stress, soak)
+│       ├── _loadtest.yml        공통 실행(workflow_call): 입력 확인 → 승인 → 컨트롤러 → 결과 → 뒷정리
 │       ├── stop.yml             수동: 시험 ID 의 k6 태스크 중지
 │       └── cleanup.yml          수동(승인): 회차 마감 뒤 시험 ID 의 시험 데이터 정리
 ├── go.mod                       Go 모듈 하나(config, controller, token-minter). tools/check-workflows 는 따로
@@ -106,7 +107,7 @@ nova-loadtest/
 
 | 환경 변수 | 내용 |
 |---|---|
-| `TEST_ID` | 시험 ID(`lt-<yyyymmddThhmm>-<run_number>`). 모든 지표의 `test_id` 태그, User-Agent, 요약 경로에 쓴다 |
+| `TEST_ID` | 시험 ID(`lt-<yyyymmddThhmm>-<run_id>`). 모든 지표의 `test_id` 태그, User-Agent, 요약 경로에 쓴다 |
 | `TASK_INDEX` | 태스크 번호 i. 토큰 파일과 요약 파일 이름에 쓴다 |
 | `START_AT` | k6를 시작할 시각(UTC, RFC 3339). `k6-runner`가 이때까지 기다린다. 준비 구간이 여기서 시작하고, 본 시험은 그 뒤(`open_at`이 있으면 그 시각)에 시작한다 |
 | `SEGMENT`, `SEGMENT_SEQUENCE` | `i/N:(i+1)/N`, `0,1/N,…,1` |
@@ -197,7 +198,7 @@ nova-loadtest/
 |---|---|---|
 | `ci.yml` | workflow-lint, lint-test, k6-inspect, image-build, k6-safety(7.2의 2단계) | 없음 |
 | `build.yml` | build-push(이미지 3개 행렬, 커밋 태그) → promote(`latest` 세 개를 한꺼번에) | `nova-prod-loadtest-github-build` |
-| `loadtest.yml` | `plan` → `run`(environment `loadtest`) | `plan`은 build 역할로 ECR만 조회한다. `run`은 `nova-prod-loadtest-github-run` |
+| `_loadtest.yml`(시나리오별 `loadtest-<시나리오>.yml`이 부른다) | `plan` → `run`(environment `loadtest`) | `plan`은 build 역할로 ECR만 조회한다. `run`은 `nova-prod-loadtest-github-run` |
 | `stop.yml` | stop | `nova-prod-loadtest-github-build` |
 | `cleanup.yml` | cleanup(environment `loadtest`) | `nova-prod-loadtest-github-run` |
 
@@ -210,7 +211,7 @@ nova-loadtest/
   - 마지막 단계에서 판정 결과가 합격이 아니면 작업을 실패로 끝낸다.
 - `stop`: `startedBy=<시험 ID>`인 k6 태스크를 멈춘다. 컨트롤러가 끝까지 남아 "중단" 결과를 쓴다. k6를 띄우기 전(토큰 발급 중)이면 컨트롤러와 발급기를 멈춰 k6가 뜨지 않게 한다. 이때는 결과가 남지 않아 판정 불가로 끝난다.
 - `cleanup`: 입력은 시험 ID 하나다. `results/<test_id>/summary.json`이 있는지 보고(끝난 시험만), `tasks.data`가 없으면 바로 실패한다. 컨트롤러를 정리 모드로 띄우고 기다린다. `startedBy`는 `<시험 ID>-c`로 해 시험 태스크와 가른다.
-- `loadtest.yml`은 `concurrency: { group: loadtest, cancel-in-progress: false }`. 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라, 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook에 적는다).
+- 시나리오별 워크플로는 모두 `concurrency: { group: loadtest, cancel-in-progress: false }`. 공통 실행에는 두지 않는다(같은 그룹을 두면 부르는 실행과 교착이 되어 GitHub 이 실행을 취소한다). 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라, 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook에 적는다).
 - `build.yml`은 이 그룹에 넣지 않는다(기다리던 빌드가 시험 실행에 밀려 취소된다). 커밋 해시 태그를 올린 뒤, `promote` 작업 하나가 시험 클러스터의 RUNNING 태스크를 `ListTasks`로 보고 없을 때만 세 이미지의 `latest`를 한꺼번에 옮긴다. 옮길 때는 ECR API로 커밋 태그의 매니페스트를 읽어(`BatchGetImage`) `latest`로 다시 쓴다(`PutImage`). 레이어를 내려받지 않으므로 빌드 역할에 `ecr:GetDownloadUrlForLayer`가 없어도 된다(`docker buildx imagetools create`는 이 권한이 없어 실패했다). 이미지 하나라도 올리지 못했거나, 실행한 커밋이 main의 마지막 커밋이 아니거나, 태스크가 있으면 옮기지 않고 실패한다. 옮긴 뒤에도 한 번 더 보고, 그 사이에 시험이 시작됐으면 실패로 알린다. 빌드끼리는 동시 실행 그룹 `build`로 push 순서대로 돌려 오래된 커밋이 `latest`를 덮지 않게 한다. 남는 틈은 컨트롤러가 막는다: 시작 시각 전에 k6 태스크들의 `imageDigest`(`DescribeTasks`)가 다르면 시험을 취소한다
 
 **SSM 값 형식**(인프라가 정했다. 경로 `/nova-prod/loadtest/run-task`, `/nova-prod/loadtest/observability`, String, 값은 JSON)
@@ -322,7 +323,7 @@ nova-infra의 "PR 하나에 층 하나" 규칙을 따른다. 층 번호는 `atla
 | C-1 | `build.yml` | B-3 | main push로 이미지 3개가 ECR에 올라간다 |
 | C-2 | 상품 조회만 smoke, k6 1대 RunTask(손으로) | C-1 | Mimir에서 k6 지표가 보인다. 지표 이름, 시계열 수, `service.instance.id`를 확인한다 |
 | C-3 | 발급기 운영 실행 | C-1, R-1 | 발급한 토큰으로 `GET /api/v1/preorders`가 200이다 |
-| C-4 | `loadtest.yml` 전체 smoke(시험 상품, 회원 수백 명), `docs/runbook.md` | C-2, C-3, B-4 | 실행 요약에 결과가 나오고 정리가 끝난다. 7.3의 GitHub에서만 확인할 것을 모두 확인한다 |
+| C-4 | `loadtest-smoke.yml` 전체 smoke(시험 상품, 회원 수백 명), `docs/runbook.md` | C-2, C-3, B-4 | 실행 요약에 결과가 나오고 정리가 끝난다. 7.3의 GitHub에서만 확인할 것을 모두 확인한다 |
 | C-5 | 실측 반영 | C-4 | 태스크당 초당 요청, VU 메모리를 `scenarios.yml`에 반영한다 |
 
 ### D. 확대
@@ -372,7 +373,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 |---|---|---|---|
 | 1. 단위 | `ci.yml`(GitHub, 로컬 Forgejo) | `cmd/plan` 계산(아래 "계획 계산 시험"), 발급기의 클레임 고정과 범위 거절, 컨트롤러 판정(가짜 ECS, 가짜 Mimir로 결과 다섯), k6 스크립트 `k6 inspect` | 아니요 |
 | 2. 이미지 | `ci.yml` k6-safety 작업 | 이미지 3개를 `linux/amd64`로 빌드. k6 이미지를 시험용 응답 서버(`services`)에 붙여 돌린다: User-Agent, `responseCallback`, 오류를 내면 99, SIGTERM에 105와 요약 업로드(moto S3) | 아니요 |
-| 3. 워크플로 | 로컬 Forgejo | `loadtest.yml`, `stop.yml`, `cleanup.yml`을 moto, fake-cluster에 붙여 각본별로 돌린다(아래 표, `go run ./controller/cmd/scenarios`) | 아니요 |
+| 3. 워크플로 | 로컬 Forgejo | 시험 워크플로(`loadtest-<시나리오>.yml` → `_loadtest.yml`), `stop.yml`, `cleanup.yml`을 moto, fake-cluster에 붙여 각본별로 돌린다(아래 표, `go run ./controller/cmd/scenarios`) | 아니요 |
 | 4. 흐름 | 로컬 be | k6 흐름 다섯 개를 로컬 be와 시험용 키로 돌린다(A-3, A-4) | 아니요 |
 | 5. 운영 | GitHub | 상품 조회 smoke → 전체 smoke(C-2, C-4). 7.3을 여기서 확인한다 | 예, 승인 뒤 |
 
@@ -453,6 +454,7 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 실행 요약 | `$GITHUB_STEP_SUMMARY` | Forgejo 17 + 러너 13.2부터 같은 변수 지원 | `$GITHUB_STEP_SUMMARY`만 쓴다 |
 | 기본 이미지 | ubuntu, 도구가 많다 | Debian + node.js 정도 | `jq`, AWS CLI 같은 기본 도구에 기대지 않는다. Go는 `setup-go`로 깔고, 계산과 AWS 호출은 Go 명령(`cmd/plan`, 컨트롤러)으로 한다 |
 | CODEOWNERS, 브랜치 보호, environment | 동작 | 이 저장소 설정과 무관 | A-1a에서 GitHub에 설정한다(B-2 전) |
+| 재사용 워크플로(`workflow_call`) | 부르는 작업 아래에 부른 워크플로의 작업이 묶인다 | 부른 워크플로의 작업(`plan`, `run`)을 따로 펼쳐 돌리고, 부르는 작업은 러너 없이(`runs_on` 비어 있음) 남아 로그가 없다(2026-10-20 확인, Forgejo 17) | 각본 실행기는 `runs_on`이 빈 작업의 로그를 받지 않는다. 비밀 상속(`secrets: inherit`)과 environment는 두 곳에서 같이 동작한다 |
 
 - 액션은 커밋 해시로 고정한다(`actions/checkout@<sha>`). 두 곳이 같은 코드를 받고, 공개 저장소에서 태그가 바뀌는 위험도 막는다.
 

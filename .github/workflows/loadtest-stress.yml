@@ -1,0 +1,46 @@
+name: loadtest stress
+
+# 단계마다 부하를 올려 첫 병목을 찾는다. 단계 시간과 배수는 scenarios.yml 에 있다.
+# 공통 실행은 _loadtest.yml 이다. 시나리오 설명은 위키 "시나리오-stress"에 있다.
+on:
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: 진입할 시험 상품 ID. 진입 흐름(entry)이 있으면 필수, flows 에 없으면 비운다
+      prep_product_id:
+        description: 준비 구간에 쓸 시험 상품 ID. 비우면 product_id
+      peak_rps:
+        description: 마지막 단계의 흐름 시작 수 합계(초당). 비우면 기본 808
+      runners:
+        description: k6 태스크 대수. 비우면 계산한 값
+      flows:
+        description: 돌릴 흐름(쉼표로 구분, catalog, preorders, entry, order, cancel). 비우면 다섯 흐름
+      abort_error_rate:
+        description: 중단할 오류율(%, 0보다 크고 50 이하. 5 는 5%). 비우면 기본 5
+
+# 모든 시나리오가 같은 그룹을 쓴다. 같은 시간에는 시험을 하나만 돌리고, 진행 중인 시험은 취소하지 않는다.
+# 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라 시험 중에 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook).
+concurrency:
+  group: loadtest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  loadtest:
+    # 공통 실행의 작업이 OIDC 로 역할을 맡는다. 부르는 쪽이 준 권한보다 넓힐 수 없다
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_loadtest.yml
+    # 빌드 역할 ARN 은 저장소 비밀이다. 실행 역할 ARN 과 Slack 주소는 공통 실행의 run 작업이 environment loadtest 에서 읽는다
+    secrets: inherit
+    with:
+      scenario: stress
+      product_id: ${{ inputs.product_id }}
+      prep_product_id: ${{ inputs.prep_product_id }}
+      peak_rps: ${{ inputs.peak_rps }}
+      runners: ${{ inputs.runners }}
+      flows: ${{ inputs.flows }}
+      abort_error_rate: ${{ inputs.abort_error_rate }}

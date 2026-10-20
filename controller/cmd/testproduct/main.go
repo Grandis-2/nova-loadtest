@@ -192,7 +192,6 @@ func cleanup() {
 
 func guide(ps []testproduct.Product, spike, rush bool) {
 	fmt.Println()
-	fmt.Println("loadtest.yml 입력")
 	if rush {
 		p := ps[0]
 		cfg, err := config.Default()
@@ -201,12 +200,14 @@ func guide(ps []testproduct.Product, spike, rush bool) {
 		}
 		// 준비 상품이 없으므로 지금부터 실행할 수 있다. open_at 이 plan 의 상한 안에 들어야 한다
 		start, end := runWindow(time.Now(), p.OpensAt, cfg.Runner.MaxOpenAtLead.D())
-		fmt.Printf("  scenario: rush\n  product_id: %s\n  open_at: %s\n", p.ID, p.OpensAt.Format(time.RFC3339))
+		fmt.Println("loadtest-rush.yml 입력")
+		fmt.Printf("  product_id: %s\n  open_at: %s\n", p.ID, p.OpensAt.Format(time.RFC3339))
 		fmt.Printf("\n%s 뒤, %s 전에 실행한다(회차가 열리기 전).\n", local(start), local(end))
 		return
 	}
 	if !spike {
 		p := ps[0]
+		fmt.Println("loadtest-<시나리오>.yml 입력(smoke, load, spike, stress, soak)")
 		fmt.Printf("  product_id: %s\n", p.ID)
 		fmt.Printf("\n%s 이후에 실행한다(회차가 열린 뒤).\n", local(p.OpensAt))
 		fmt.Println("열린 이 상품으로 spike 도 할 수 있다. open_at 과 prep_product_id 를 비우면 준비 구간이 끝나는 대로 몰린다.")
@@ -218,7 +219,8 @@ func guide(ps []testproduct.Product, spike, rush bool) {
 		fatal("%v", err)
 	}
 	start, end := runWindow(prep.OpensAt, entry.OpensAt, cfg.Runner.MaxOpenAtLead.D())
-	fmt.Printf("  scenario: spike\n  product_id: %s\n  prep_product_id: %s\n  open_at: %s\n",
+	fmt.Println("loadtest-spike.yml 입력")
+	fmt.Printf("  product_id: %s\n  prep_product_id: %s\n  open_at: %s\n",
 		entry.ID, prep.ID, entry.OpensAt.Format(time.RFC3339))
 	fmt.Printf("\n%s 뒤, %s 전에 실행한다.\n", local(start), local(end))
 	fmt.Printf("준비 상품이 열려 있어야 하고, open_at 은 실행 시각부터 %s 안이어야 하며, 진입 상품 오픈 %s 전까지 실행한다.\n",

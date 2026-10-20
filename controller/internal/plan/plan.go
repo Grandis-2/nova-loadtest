@@ -20,7 +20,7 @@ var (
 	testIDRe = regexp.MustCompile(`^lt-[0-9]{8}t[0-9]{4}-[0-9]+$`)
 )
 
-// Input은 loadtest.yml의 입력이다. 비어 있는 값은 시나리오 기본값을 쓴다.
+// Input은 시험 워크플로(loadtest-<시나리오>.yml)의 입력이다. 비어 있는 값은 시나리오 기본값을 쓴다.
 // 워크플로가 컨트롤러에 INPUT_JSON 으로 넘길 때 아래 JSON 이름을 쓴다.
 type Input struct {
 	TestID         string    `json:"test_id"`

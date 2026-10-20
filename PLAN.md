@@ -29,7 +29,7 @@
 
 ```mermaid
 flowchart LR
-    op(["담당자"]) -->|"실행, 승인"| gha["GitHub Actions<br/>loadtest.yml"]
+    op(["담당자"]) -->|"실행, 승인"| gha["GitHub Actions<br/>loadtest-&lt;시나리오&gt;.yml"]
 
     subgraph aws["AWS"]
         ssm[("SSM<br/>실행 값, 관측 값")]
@@ -110,15 +110,14 @@ sequenceDiagram
 |---|---|---|
 | `ci.yml` | PR을 올릴 때 | 워크플로 검사, 린트, 단위 테스트, k6 스크립트 검사, 이미지 빌드와 k6 안전장치 시험 |
 | `build.yml` | main에 push 할 때 | k6, 컨트롤러, 토큰 발급기 이미지를 빌드해 ECR에 올린다 |
-| `loadtest.yml` | Actions 탭에서 손으로 실행 | 입력을 받아 시험을 한 번 돌린다. 승인이 필요하다 |
+| `loadtest-<시나리오>.yml` | Actions 탭에서 손으로 실행 | 시나리오마다 하나씩 있고, 그 시나리오가 쓰는 입력만 받는다. 공통 실행 `_loadtest.yml`을 불러 시험을 한 번 돌린다. 승인이 필요하다 |
 | `stop.yml` | Actions 탭에서 손으로 실행 | 시험 ID로 도는 k6 태스크를 모두 멈춘다. 승인 없이 바로 돈다 |
 | `cleanup.yml` | 담당자가 회차를 마감한 뒤 실행 | 시험 ID의 시험 데이터를 지운다. 승인이 필요하다 |
 
-`loadtest.yml`의 입력은 다음과 같다. 필요한 회원 수는 시나리오와 부하에 따라 크게 달라지므로, 입력받지 않고 계획을 계산할 때 구한다.
+시험 워크플로의 입력은 다음과 같다. GitHub의 입력 화면에는 조건부 입력이 없어서, 시나리오마다 워크플로를 나누고 그 시나리오가 쓰지 않는 입력은 보이지 않게 했다(어느 워크플로에 무엇이 보이는지는 [runbook](docs/runbook.md#입력)). 필요한 회원 수는 시나리오와 부하에 따라 크게 달라지므로, 입력받지 않고 계획을 계산할 때 구한다.
 
 | 입력 | 기본값 | 설명 |
 |---|---|---|
-| `scenario` | `smoke` | smoke, load, spike, rush, stress, soak 중 하나 |
 | `product_id` | 없음 | 진입과 접수에 쓰는 시험 상품 ID. 진입 흐름이 있으면 반드시 넣는다 |
 | `prep_product_id` | `product_id` | 조회, 취소, 결제에 쓸 예약을 미리 만들어 둘 시험 상품 ID. `open_at`을 넣은 spike에서는 따로 넣고, rush에서는 비운다 |
 | `open_at` | 없음 | 회차가 열리는 시각(UTC). 넣으면 본 시험을 이 시각에 맞춰 시작한다. rush에서는 반드시 넣는다. spike에서 비우면 이미 열린 상품으로 보고 준비 구간이 끝나는 대로 몰린다. 지금부터 1시간 안이어야 한다(기다리는 시간도 작업 6시간 상한과 토큰 유효 시간에 들어가기 때문이다) |
@@ -129,7 +128,7 @@ sequenceDiagram
 | `abort_error_rate` | `5` | 오류율이 이 값(%)을 1분 넘게 넘으면 시험을 멈춘다 |
 | `flows` | 모두 | 돌릴 흐름(쉼표로 구분). 첫 smoke는 `catalog`만 넣어 토큰, 회원, 시험 상품 없이 돌린다 |
 
-터미널에서는 `gh workflow run loadtest.yml -f scenario=spike -f product_id=<id> -f prep_product_id=<id> -f open_at=<UTC 시각> -f peak_rps=500`처럼 실행할 수 있다.
+터미널에서는 `gh workflow run loadtest-spike.yml -f product_id=<id> -f prep_product_id=<id> -f open_at=<UTC 시각> -f peak_rps=500`처럼 실행할 수 있다.
 
 ## 시나리오
 

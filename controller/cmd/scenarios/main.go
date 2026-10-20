@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,7 +47,7 @@ const (
 // Case 는 각본 하나다
 type Case struct {
 	Name     string // fake-cluster 의 각본 이름
-	Workflow string // 기본 loadtest.yml
+	Workflow string // 비면 Inputs["scenario"] 의 loadtest-<시나리오>.yml. scenario 는 입력으로 넘기지 않는다
 	Inputs   map[string]string
 	Long     bool
 	// Forgejo 에서는 확인할 수 없는 각본. 이름을 줄 때만 돈다(까닭은 구현 계획 7.3)
@@ -389,7 +390,9 @@ func main() {
 	var failed []string
 	for _, c := range selected {
 		if c.Workflow == "" {
-			c.Workflow = "loadtest.yml"
+			c.Workflow = "loadtest-" + c.Inputs["scenario"] + ".yml"
+			c.Inputs = maps.Clone(c.Inputs)
+			delete(c.Inputs, "scenario")
 		}
 		start := time.Now()
 		err := r.run(c)
@@ -398,7 +401,7 @@ func main() {
 			status = "실패: " + err.Error()
 			failed = append(failed, c.Name)
 		}
-		fmt.Printf("%-22s %-12s %5.0f초  %s\n", c.Name, c.Workflow, time.Since(start).Seconds(), status)
+		fmt.Printf("%-22s %-19s %5.0f초  %s\n", c.Name, c.Workflow, time.Since(start).Seconds(), status)
 	}
 	if len(failed) > 0 {
 		fail("실패한 각본: %s", strings.Join(failed, ", "))
@@ -570,8 +573,9 @@ func (r *runner) wait(run int, limit time.Duration) (string, error) {
 // (로그가 비면 "로그에 비밀이 없다" 같은 확인이 아무것도 보지 않고 통과한다)
 func (r *runner) logs(run int) (string, error) {
 	var jobs []struct {
-		ID     int    `json:"id"`
-		Status string `json:"status"`
+		ID     int      `json:"id"`
+		Status string   `json:"status"`
+		RunsOn []string `json:"runs_on"`
 	}
 	if err := r.forgejo(http.MethodGet, fmt.Sprintf("/actions/runs/%d/jobs", run), nil, &jobs); err != nil {
 		return "", err
@@ -581,6 +585,9 @@ func (r *runner) logs(run int) (string, error) {
 	for _, j := range jobs {
 		if j.Status == "skipped" {
 			continue // 앞 작업이 실패해 돌지 않은 작업에는 로그가 없다
+		}
+		if len(j.RunsOn) == 0 {
+			continue // 재사용 워크플로를 부르는 작업이다. Forgejo 가 부른 워크플로의 작업을 따로 펼쳐 돌리고, 이 작업에는 로그가 없다
 		}
 		read++
 		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/actions/jobs/%d/logs", forgejo, j.ID), nil)

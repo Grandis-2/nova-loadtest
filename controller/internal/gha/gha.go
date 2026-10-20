@@ -69,11 +69,12 @@ func localURL(raw string) bool {
 	return true
 }
 
-// TestID 는 시험 ID 다: lt-<UTC yyyymmddThhmm>-<run_number>. 소문자, 숫자, - 만 쓴다(RunTask startedBy, S3 경로, 태그)
-func TestID(now time.Time, runNumber string) (string, error) {
-	n, err := strconv.Atoi(runNumber)
+// TestID 는 시험 ID 다: lt-<UTC yyyymmddThhmm>-<run_id>. 소문자, 숫자, - 만 쓴다(RunTask startedBy, S3 경로, 태그).
+// 실행 번호(run_number)는 워크플로마다 따로 세서 시나리오별 워크플로끼리 겹친다. 실행 ID 는 저장소 안에서 하나뿐이다
+func TestID(now time.Time, runID string) (string, error) {
+	n, err := strconv.ParseInt(runID, 10, 64)
 	if err != nil || n <= 0 {
-		return "", fmt.Errorf("GITHUB_RUN_NUMBER %q 가 숫자가 아니다", runNumber)
+		return "", fmt.Errorf("GITHUB_RUN_ID %q 가 숫자가 아니다", runID)
 	}
 	return fmt.Sprintf("lt-%st%s-%d", now.UTC().Format("20060102"), now.UTC().Format("1504"), n), nil
 }

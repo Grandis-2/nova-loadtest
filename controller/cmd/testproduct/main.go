@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Grandis-2/nova-loadtest/config"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/gha"
 	"github.com/Grandis-2/nova-loadtest/controller/internal/testproduct"
 )
@@ -49,8 +50,10 @@ func main() {
 		if err != nil {
 			fatal("-open-at: %v", err)
 		}
-		if entry.Before(first) {
-			fatal("-open-at 은 준비 상품 오픈(%s) 뒤여야 한다. 실행할 때 준비 상품이 이미 열려 있어야 한다", first.Format(time.RFC3339))
+		// 준비 상품이 열린 뒤, 진입 상품 오픈 15분 전까지 실행한다. 그 구간이 비지 않게 한다
+		if !entry.After(first.Add(runLead)) {
+			fatal("-open-at 은 준비 상품 오픈(%s) %s 뒤보다 늦어야 한다. 준비 상품이 열린 뒤, 진입 상품 오픈 %s 전까지 실행하기 때문이다",
+				first.Format(time.RFC3339), runLead, runLead)
 		}
 		// 준비 상품은 진입 상품의 회차가 끝날 때까지 열어 둔다
 		specs = []testproduct.Spec{
@@ -62,6 +65,13 @@ func main() {
 	}
 	for _, s := range specs {
 		if err := s.Check(now); err != nil {
+			fatal("%v", err)
+		}
+	}
+
+	// 관리자 토큰을 보낼 주소인지 먼저 본다. 본문만 출력할 때는 토큰을 보내지 않는다
+	if !dryRun {
+		if err := testproduct.CheckURL(baseURL); err != nil {
 			fatal("%v", err)
 		}
 	}
@@ -129,11 +139,16 @@ func guide(ps []testproduct.Product, spike bool) {
 		return
 	}
 	prep, entry := ps[0], ps[1]
+	cfg, err := config.Default()
+	if err != nil {
+		fatal("%v", err)
+	}
+	start, end := runWindow(prep.OpensAt, entry.OpensAt, cfg.Runner.MaxOpenAtLead.D())
 	fmt.Printf("  scenario: spike\n  product_id: %s\n  prep_product_id: %s\n  open_at: %s\n",
 		entry.ID, prep.ID, entry.OpensAt.Format(time.RFC3339))
-	fmt.Printf("\n%s(준비 상품 오픈) 뒤, %s(진입 상품 오픈 15분 전) 전에 실행한다.\n",
-		local(prep.OpensAt), local(entry.OpensAt.Add(-15*time.Minute)))
-	fmt.Println("open_at 은 실행 시각부터 1시간 안이어야 한다.")
+	fmt.Printf("\n%s 뒤, %s 전에 실행한다.\n", local(start), local(end))
+	fmt.Printf("준비 상품이 열려 있어야 하고, open_at 은 실행 시각부터 %s 안이어야 하며, 진입 상품 오픈 %s 전까지 실행한다.\n",
+		cfg.Runner.MaxOpenAtLead.D(), runLead)
 }
 
 func prefix(label string) string {
@@ -141,6 +156,19 @@ func prefix(label string) string {
 		return "시험 "
 	}
 	return label + " "
+}
+
+// runLead 는 spike 실행을 진입 상품 오픈보다 얼마나 앞서 해야 하는가다. 준비 구간, 등록 대기, 토큰 발급, k6 기동이 그 사이에 든다
+const runLead = 15 * time.Minute
+
+// runWindow 는 spike 를 실행해도 되는 구간이다. 준비 상품이 열린 뒤이면서 open_at 이 plan 의 상한(maxLead,
+// scenarios.yml runner.max_open_at_lead) 안에 들고, 진입 상품 오픈 15분 전까지다
+func runWindow(prepOpens, entryOpens time.Time, maxLead time.Duration) (time.Time, time.Time) {
+	start := prepOpens
+	if s := entryOpens.Add(-maxLead); s.After(start) {
+		start = s
+	}
+	return start, entryOpens.Add(-runLead)
 }
 
 func local(t time.Time) string {

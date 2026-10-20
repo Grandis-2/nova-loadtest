@@ -138,7 +138,7 @@ flowchart LR
 | 환경 변수 | 내용 |
 |---|---|
 | `NOVA_ADMIN_TOKEN` | 관리자 화면에 로그인한 세션의 토큰. 명령을 돌릴 때만 셸에 두고 끝나면 지운다. 저장소, 워크플로, AWS에 두지 않는다 |
-| `BASE_URL` | API 주소. 비우면 `https://api.grandis-nova.link` |
+| `BASE_URL` | API 주소. 비우면 `https://api.grandis-nova.link`. 관리자 토큰을 보내므로 원격 주소는 `https`만 받는다(`http`는 루프백만) |
 
 ## 이 저장소의 설정
 

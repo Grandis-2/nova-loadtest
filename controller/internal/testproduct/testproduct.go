@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -61,6 +63,23 @@ func Token(raw string, now time.Time) (string, error) {
 		return "", fmt.Errorf("NOVA_ADMIN_TOKEN 이 %s 에 만료됐다. 관리자 화면을 새로 고쳐 새 토큰을 받는다", exp.Local().Format("15:04:05"))
 	}
 	return t, nil
+}
+
+// CheckURL 은 관리자 토큰을 보낼 주소를 본다. 원격 주소는 HTTPS 만 받고, 로컬 가짜 서버를 위해 루프백만 HTTP 를 허용한다.
+func CheckURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("API 주소 %q 를 읽지 못했다", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if ip := net.ParseIP(u.Hostname()); u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("API 주소 %s 로는 관리자 토큰을 보내지 않는다. 원격 주소는 https 여야 한다(http 는 루프백만)", raw)
 }
 
 // MinOpenLead 는 be 가 받는 가장 이른 오픈(지금 + 30분)이다. 요청이 가는 동안의 시간을 생각해 1분을 더 둔다
@@ -285,6 +304,9 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if strings.Contains(path, "/admin/") {
+		if err := CheckURL(c.BaseURL); err != nil {
+			return err
+		}
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	for k, v := range headers {

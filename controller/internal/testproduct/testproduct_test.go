@@ -275,3 +275,32 @@ func TestToken(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckURL(t *testing.T) {
+	for _, u := range []string{"https://api.grandis-nova.link", "http://127.0.0.1:18089", "http://localhost:8080", "http://[::1]:80"} {
+		if err := CheckURL(u); err != nil {
+			t.Errorf("%s 는 받아야 한다: %v", u, err)
+		}
+	}
+	for _, u := range []string{"http://api.grandis-nova.link", "http://10.0.0.5", "ftp://x", "api.grandis-nova.link", ""} {
+		if err := CheckURL(u); err == nil {
+			t.Errorf("%s 로는 관리자 토큰을 보내지 않아야 한다", u)
+		}
+	}
+}
+
+// 원격 HTTP 주소면 요청을 보내기 전에 멈춘다(토큰이 나가지 않는다)
+func TestNoTokenOverHTTP(t *testing.T) {
+	sent := false
+	c := &Client{BaseURL: "http://api.example.com", Token: "secret", HTTP: &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
+		sent = true
+		return nil, io.EOF
+	})}}
+	if _, err := c.Create(context.Background(), spec()); err == nil || sent {
+		t.Fatalf("보내지 않고 실패해야 한다: sent=%v err=%v", sent, err)
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

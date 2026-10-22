@@ -104,8 +104,8 @@ func metricsFor(t *testing.T, scenario string) (mimir.Metrics, *plan.Plan, time.
 func TestMimirPass(t *testing.T) {
 	m, p, start := metricsFor(t, "pass")
 	ctx := context.Background()
-	if er, err := m.ErrorRate(ctx, start.Add(90*time.Second)); err != nil || er > 0.01 {
-		t.Fatalf("%v %v", er, err)
+	if l, err := m.Progress(ctx, start.Add(90*time.Second)); err != nil || l.ErrorRate > 0.01 || l.RPS == 0 || l.VUs == 0 || !(l.P95 > 0 && l.P95 < 500) {
+		t.Fatalf("%+v %v", l, err)
 	}
 	seen, err := m.LastSeen(ctx, start.Add(90*time.Second))
 	if err != nil || len(seen) != p.Tasks || seen["1"] > 10 {
@@ -118,16 +118,16 @@ func TestMimirPass(t *testing.T) {
 		t.Fatalf("%v %v", cov, err)
 	}
 	total, byName, err := m.Window(ctx, ws, we)
-	if err != nil || len(byName) != len(p.Flows) || math.Abs(total.Within-0.99) > 1e-9 || total.Requests == 0 {
+	if err != nil || len(byName) != len(p.Flows) || math.Abs(total.Within-0.99) > 1e-9 || total.Requests == 0 || !(total.P99 > total.P50) {
 		t.Fatalf("%+v %v %v", total, byName, err)
 	}
 }
 
 func TestMimirScenarios(t *testing.T) {
 	ctx := context.Background()
-	m, _, start := metricsFor(t, "abort-error-rate")
-	if er, _ := m.ErrorRate(ctx, start.Add(2*time.Minute)); er < 0.2 {
-		t.Fatalf("오류율이 높아야 한다: %v", er)
+	m, _, start := metricsFor(t, "high-error-rate")
+	if l, _ := m.Progress(ctx, start.Add(2*time.Minute)); l.ErrorRate < 0.2 || l.Rate5xx < 0.2 {
+		t.Fatalf("오류율이 높아야 한다: %+v", l)
 	}
 	m, _, start = metricsFor(t, "inconclusive-silent")
 	if seen, _ := m.LastSeen(ctx, start.Add(100*time.Second)); seen["1"] < 60 || seen["0"] > 10 {
@@ -144,9 +144,12 @@ func TestMimirScenarios(t *testing.T) {
 	if cov["0"] >= float64(w.End-w.Start)/10-5 || cov["1"] < float64(w.End-w.Start)/10-1 {
 		t.Fatalf("구간 판정에서 걸려야 한다: %v (%+v)", cov, w)
 	}
-	m, _, start = metricsFor(t, "inconclusive-mimir")
-	if _, err := m.ErrorRate(ctx, start.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "503") {
+	m, _, start = metricsFor(t, "mimir-down-recovers")
+	if _, err := m.Progress(ctx, start.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("503 이어야 한다: %v", err)
+	}
+	if _, err := m.Progress(ctx, start.Add(3*time.Minute)); err != nil {
+		t.Fatalf("다시 조회되어야 한다: %v", err)
 	}
 	m, p, start = metricsFor(t, "fail")
 	w = p.Windows[0]

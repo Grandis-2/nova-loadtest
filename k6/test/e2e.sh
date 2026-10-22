@@ -5,7 +5,7 @@
 #   k6/test/e2e.sh ok       다섯 흐름 smoke(30초). 0으로 끝나고, 규칙 위반이 없고, 모든 경로를 불렀는지 본다
 #   k6/test/e2e.sh rush     rush 를 작게 줄여(회원 10명) 접수, 등록 알림, 주문, 결제 시도까지 가는지 본다(약 40초)
 #   k6/test/e2e.sh queue    queue 30명이 모두 접수하고, 처리 기한(약 3분)을 기다리지 않고 바로 끝나는지 본다(약 20초)
-#   k6/test/e2e.sh error    오류가 계속되면 중단 임계치로 99로 끝나는지 본다(약 1분 30초)
+#   k6/test/e2e.sh error    오류가 계속되어도 멈추지 않고 계획한 시간(30초)까지 돌아 0으로 끝나는지 본다(NV-780)
 #   k6/test/e2e.sh sigterm  도중에 멈추면 105로 끝나고 요약을 올리는지 본다
 #   k6/test/e2e.sh tokenfail 토큰을 받지 못하면 k6 를 띄우지 않고 120으로 끝나며, 오류를 담은 결과를 올리는지 본다
 #
@@ -78,7 +78,8 @@ PY
     # 계획을 줄이지 않고 그대로 쓴다. 30명을 3초 동안 들여보낸다
     "$work/plan" -test-id "$test_id" -scenario queue -product-id "$product" -members 30 -peak-rps 10 -json "$work/plan.json"
     ;;
-  error | sigterm | tokenfail) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
+  error) "$work/plan" -test-id "$test_id" -scenario smoke -duration 30s -flows catalog -json "$work/plan.json" ;;
+  sigterm | tokenfail) "$work/plan" -test-id "$test_id" -scenario smoke -duration 2m -flows catalog -json "$work/plan.json" ;;
   *) echo "모드 $mode 를 모른다" >&2; exit 2 ;;
 esac
 
@@ -164,8 +165,12 @@ case "$mode" in
     expect "처리 기한 전에 끝났다(${elapsed}초)" "$([ "$elapsed" -lt 60 ] && echo yes || echo no)" yes
     ;;
   error)
-    expect "중단 임계치로 끝난 종료 코드" "$code" 99
-    expect "올린 요약" "$uploaded" "99 True"
+    # 임계치가 없으니 오류가 많아도 끝까지 돈다. 실패한 요청은 요약에 남는다
+    expect "오류가 계속되어도 정상 종료" "$code" 0
+    expect "올린 요약" "$uploaded" "0 True"
+    expect "계획한 시간까지 돌았다(${elapsed}초)" "$([ "$elapsed" -ge 30 ] && echo yes || echo no)" yes
+    failed=$(printf '%s' "$summary" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["summary"]["metrics"]["http_req_failed"]["values"]["passes"]) > 0)' 2> /dev/null || echo "없음")
+    expect "실패한 요청을 셌다" "$failed" True
     ;;
   sigterm)
     expect "외부 중지로 끝난 종료 코드" "$code" 105

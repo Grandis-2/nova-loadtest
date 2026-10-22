@@ -281,8 +281,14 @@ func (e Env) report(ctx context.Context, rt *infra.RunTask, testID string, code 
 		return fmt.Errorf("결과 %s 를 남겼지만 컨트롤러가 종료 코드 %d 로 끝났다(컨트롤러 로그를 본다)", s.Result, code)
 	}
 	e.slack(ctx, testID, fmt.Sprintf("%s: %s %s", s.Scenario, s.Result, s.Reason))
+	// 계획대로 끝까지 돌았으면 불합격도 시험 결과다. 작업은 성공으로 두고 경고로 알린다(NV-780).
+	// 도구가 제대로 돌지 못한 경우(중단, 판정 불가, 취소)만 실패로 끝낸다
 	if !s.Result.Success() {
 		return fmt.Errorf("결과 %s: %s", s.Result, s.Reason)
+	}
+	if s.Result == report.Fail {
+		e.printf("::warning::결과 %s: %s(실행 요약에 요청별 지연과 실패율이 있다)", s.Result, s.Reason)
+		return nil
 	}
 	e.printf("결과 %s", s.Result)
 	return nil

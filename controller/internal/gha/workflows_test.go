@@ -143,8 +143,6 @@ func TestScenarioWorkflows(t *testing.T) {
 				case "duration", "ramp_up":
 					d, err := time.ParseDuration(m[1])
 					ok = err == nil && (k == "duration" && d == sc.Duration.D() || k == "ramp_up" && d == sc.RampUp.D())
-				case "abort_error_rate":
-					ok = m[1] == strconv.FormatFloat(cfg.SLO.AbortErrorRate, 'f', -1, 64)
 				case "members":
 					ok = m[1] == strconv.Itoa(sc.Members)
 				default:
@@ -186,7 +184,7 @@ func TestScenarioWorkflows(t *testing.T) {
 				case "members":
 					in.Members = 100
 				default:
-					continue // 모든 시나리오가 쓰거나(scenario, product_id, peak_rps, runners, abort_error_rate) 따로 정한다
+					continue // 모든 시나리오가 쓰거나(scenario, product_id, peak_rps, runners) 따로 정한다
 				}
 				unused := ""
 				if _, err := plan.New(cfg, in); err != nil {

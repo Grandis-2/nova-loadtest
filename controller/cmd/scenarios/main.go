@@ -138,7 +138,7 @@ func cases() []Case {
 			}
 			return allStopped(r, o)
 		}},
-		{Name: "fail", Inputs: smoke(nil), Conclusion: "failure", Result: "fail", Check: func(_ *runner, o *outcome) error {
+		{Name: "fail", Inputs: smoke(nil), Conclusion: "success", Result: "fail", Check: func(_ *runner, o *outcome) error {
 			// 흐름별 표는 실행 요약에 들어간다. summary.json 의 구간별 판정에서 결제(주문)만 걸렸는지 본다
 			b, _ := json.Marshal(o.summary["windows"])
 			var windows []struct {
@@ -163,21 +163,27 @@ func cases() []Case {
 			}
 			return nil
 		}},
-		{Name: "abort-error-rate", Inputs: smoke(map[string]string{"runners": "2"}), Conclusion: "failure", Result: "aborted", Check: func(r *runner, o *outcome) error {
-			if len(o.state.Stops) < 2 {
-				return fmt.Errorf("k6 태스크를 모두 멈춰야 한다: %v", o.state.Stops)
+		// 기준을 넘어도 멈추지 않는다. 불합격도 결과라 작업은 성공이다(NV-780)
+		{Name: "high-error-rate", Inputs: smoke(map[string]string{"runners": "2"}), Conclusion: "success", Result: "fail", Check: func(r *runner, o *outcome) error {
+			if len(o.state.Stops) != 0 {
+				return fmt.Errorf("기준을 넘어도 태스크를 멈추지 않아야 한다: %v", o.state.Stops)
+			}
+			if p, _ := o.summary["progress"].([]any); len(p) == 0 {
+				return errors.New("진행 값(progress)을 남겨야 한다")
 			}
 			return allStopped(r, o)
 		}},
-		{Name: "abort-task-99", Inputs: smoke(map[string]string{"runners": "3"}), Conclusion: "failure", Result: "aborted", Check: func(_ *runner, o *outcome) error {
-			if len(o.state.Stops) < 2 {
-				return fmt.Errorf("나머지 태스크를 멈춰야 한다: %v", o.state.Stops)
+		{Name: "task-dies-early", Inputs: smoke(map[string]string{"runners": "3"}), Conclusion: "failure", Result: "inconclusive", Check: func(r *runner, o *outcome) error {
+			if len(o.state.Stops) != 0 {
+				return fmt.Errorf("나머지 태스크는 멈추지 않아야 한다: %v", o.state.Stops)
 			}
-			return nil
+			if w, _ := o.summary["windows"].([]any); len(w) == 0 {
+				return errors.New("판정 불가여도 구간 값을 남겨야 한다")
+			}
+			return allStopped(r, o)
 		}},
-		{Name: "end-99", Inputs: smoke(map[string]string{"runners": "3"}), Conclusion: "success", Result: "pass"},
 		{Name: "inconclusive-silent", Inputs: smoke(map[string]string{"runners": "2"}), Conclusion: "failure", Result: "inconclusive", Check: allStopped},
-		{Name: "inconclusive-mimir", Inputs: smoke(nil), Conclusion: "failure", Result: "inconclusive", Check: allStopped},
+		{Name: "mimir-down-recovers", Inputs: smoke(nil), Conclusion: "success", Result: "pass", Check: allStopped},
 		{Name: "inconclusive-gap", Inputs: smoke(map[string]string{"runners": "2"}), Conclusion: "failure", Result: "inconclusive"},
 		{Name: "start-cancel", Inputs: smoke(map[string]string{"runners": "4"}), Conclusion: "failure", Result: "canceled", Check: allStopped},
 		{Name: "minter-fail", Inputs: smoke(nil), Conclusion: "failure", Result: "canceled", Check: func(_ *runner, o *outcome) error {

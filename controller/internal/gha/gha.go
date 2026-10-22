@@ -118,7 +118,6 @@ func Inputs(getenv func(string) string) (plan.Input, error) {
 		set(f)
 	}
 	num("LT_PEAK_RPS", func(f float64) { in.PeakRPS = f })
-	num("LT_ABORT_ERROR_RATE", func(f float64) { in.AbortErrorRate = f })
 	integer := func(name string, set func(int)) {
 		v := strings.TrimSpace(getenv(name))
 		if v == "" {

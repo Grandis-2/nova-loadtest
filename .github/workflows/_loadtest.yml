@@ -32,8 +32,6 @@ on:
         type: string
       members:
         type: string
-      abort_error_rate:
-        type: string
 
 permissions:
   contents: read
@@ -52,7 +50,6 @@ env:
   LT_RUNNERS: ${{ inputs.runners }}
   LT_FLOWS: ${{ inputs.flows }}
   LT_MEMBERS: ${{ inputs.members }}
-  LT_ABORT_ERROR_RATE: ${{ inputs.abort_error_rate }}
 
 jobs:
   # 입력 확인. environment 없이 빌드 역할로 ECR 만 본다(main 조건)

@@ -88,7 +88,7 @@ flowchart LR
 
 | 환경 변수 | 쓰는 명령 | 내용 |
 |---|---|---|
-| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_MEMBERS`, `LT_ABORT_ERROR_RATE` | `plan`, `run` | 시험 워크플로의 입력(`LT_SCENARIO`는 시나리오별 워크플로가 정한다). 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_MEMBERS`는 queue의 인원이다. `LT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
+| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_MEMBERS` | `plan`, `run` | 시험 워크플로의 입력(`LT_SCENARIO`는 시나리오별 워크플로가 정한다). 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_MEMBERS`는 queue의 인원이다 |
 | `TEST_ID` | `run`, `after`, `stop`, `cleanup` | 시험 ID. `run`, `after`는 `plan` 작업의 출력을 받고, `stop`, `cleanup`은 입력을 받아 형식을 검사한다 |
 | `PLANNED_AT` | `run` | `plan` 작업이 계획한 시각(RFC3339). `run`은 이 시각으로 계획을 다시 계산해 `INPUT_JSON`의 `planned_at`에 넣는다 |
 | `AWS_ROLE_ARN` | `plan`(이미지 확인), 나머지 모두 | 맡을 역할. GitHub 비밀 `AWS_BUILD_ROLE_ARN` 또는 `AWS_RUN_ROLE_ARN`에서 받는다. `ACTIONS_ID_TOKEN_REQUEST_URL`이 있을 때만 맡고, 세션이 끝나기 10분 전에 OIDC 토큰을 다시 받아 세션을 바꾼다 |
@@ -103,7 +103,7 @@ flowchart LR
 - `run`, `cleanup`은 시작할 때 실행 위치를 확인한다. `GITHUB_SERVER_URL`이 `https://github.com`이 아니면 `AWS_ENDPOINT_URL`과 `AWS_ENDPOINT_URL_ECS`가 로컬 주소(compose 안의 이름, localhost, 사설 IP)여야 한다([구현 계획 7.4](implementation-plan.md#74-운영에-닿지-않게)).
 - AWS를 부르는 명령은 역할을 맡은 직후 `sts:GetCallerIdentity`로 계정 ID를 알아내 `::add-mask::`로 가린다. 공개 저장소라 실행 로그(태스크 ARN, AWS 오류 메시지, 옮겨 온 컨트롤러 로그)에 계정 ID가 남지 않게 한다. GitHub에서 계정 ID를 알아내지 못하면 가리지 못한 채 계속하지 않고 실패한다.
 - `run`은 SSM 두 값을 읽은 직후 다른 무엇을 출력하기 전에 가릴 값마다 `::add-mask::`를 낸다. `after`도 SSM 값을 다시 읽으므로 같은 순서를 지킨다.
-- `run`은 결과(`summary.json`)가 합격이나 한계 측정이 아니면 실패로 끝난다. `summary.json`이 없으면 판정 불가로 실패한다.
+- `run`은 결과(`summary.json`)가 합격, 불합격, 한계 측정이면 성공으로 끝난다. 불합격은 `::warning::`으로 알린다(NV-780). 중단, 판정 불가, 취소는 실패로 끝난다. `summary.json`이 없으면 판정 불가로 실패한다.
 
 ### 워크플로가 컨트롤러에 넘기는 값(RunTask 덮어쓰기)
 
@@ -143,4 +143,4 @@ flowchart LR
 
 ## 이 저장소의 설정
 
-`config/scenarios.yml` 하나에 모두 있다. 흐름 비율, 시나리오 기본값과 상한, 실행기 크기, 시험 회원 범위, 시계열 상한, SLO와 중단 기준, 정리 전에 볼 큐(`preorder-register`, `preorder-cancel`, `preorder-events`, `order-events`), Mimir 지표 이름이다. 각 항목의 뜻은 [구현 계획 2.1](implementation-plan.md#21-configscenariosyml)에 있다.
+`config/scenarios.yml` 하나에 모두 있다. 흐름 비율, 시나리오 기본값과 상한, 실행기 크기, 시험 회원 범위, 시계열 상한, SLO(판정 기준), 정리 전에 볼 큐(`preorder-register`, `preorder-cancel`, `preorder-events`, `order-events`), Mimir 지표 이름이다. 각 항목의 뜻은 [구현 계획 2.1](implementation-plan.md#21-configscenariosyml)에 있다.

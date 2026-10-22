@@ -65,32 +65,26 @@ func init() {
 		}
 		return 0.99
 	}})
-	add(Scenario{Name: "abort-error-rate", K6: running, ErrorRate: func(rel time.Duration) float64 {
+	// 70초부터 오류와 5xx 가 30% 다. 멈추지 않고 끝까지 돌아 불합격이다(NV-780)
+	add(Scenario{Name: "high-error-rate", ErrorRate: func(rel time.Duration) float64 {
 		if rel > 70*time.Second {
 			return 0.30
 		}
 		return 0.001
 	}})
-	// 태스크 2가 도중에 99(임계치)로 끝난다. runners 3
-	add(Scenario{Name: "abort-task-99", K6: func(t Task) fakeecs.Behavior {
+	// 태스크 2가 도중에 99로 끝난다. 나머지는 끝까지 돌고 판정 불가다. runners 3
+	add(Scenario{Name: "task-dies-early", K6: func(t Task) fakeecs.Behavior {
 		b := running(t)
+		b.ExitAt = t.End
 		if t.Index == 2 {
 			b.ExitAt, b.ExitCode = t.Start.Add(80*time.Second), 99
 		}
 		return b
 	}})
-	// 태스크 2가 끝 시각에 99 로 끝난다. 중단이 아니고 Mimir 판정대로 합격이다
-	add(Scenario{Name: "end-99", K6: func(t Task) fakeecs.Behavior {
-		b := running(t)
-		b.ExitAt = t.End
-		if t.Index == 2 {
-			b.ExitCode = 99
-		}
-		return b
-	}})
-	// 태스크 1의 지표가 30초부터 끊긴다. 감시는 1분 뒤부터 보므로 1분 30초쯤 걸린다
-	add(Scenario{Name: "inconclusive-silent", K6: running, Gaps: map[int][][2]int{1: {{30, 1 << 20}}}})
-	add(Scenario{Name: "inconclusive-mimir", K6: running, MimirDown: func(rel time.Duration) bool { return rel > 70*time.Second }})
+	// 태스크 1의 지표가 30초부터 끊긴다. 멈추지 않고 끝까지 돌아 구간 누락으로 판정 불가다
+	add(Scenario{Name: "inconclusive-silent", Gaps: map[int][][2]int{1: {{30, 1 << 20}}}})
+	// 70초부터 80초 동안 Mimir 를 조회하지 못한다. 멈추지 않고, 돌아온 뒤 판정한다
+	add(Scenario{Name: "mimir-down-recovers", MimirDown: func(rel time.Duration) bool { return rel > 70*time.Second && rel < 150*time.Second }})
 	// 태스크 0의 지표가 smoke 의 판정 구간(121~241초) 안에서 50초씩 두 번 빈다. 감시(1분)에는 걸리지 않고 구간 판정에서 걸린다
 	add(Scenario{Name: "inconclusive-gap", Gaps: map[int][][2]int{0: {{130, 180}, {185, 235}}}})
 	// 태스크 3이 START_AT 까지 RUNNING 이 되지 않는다. runners 4

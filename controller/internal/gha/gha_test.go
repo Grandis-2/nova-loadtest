@@ -315,10 +315,22 @@ func TestRunPass(t *testing.T) {
 	}
 }
 
+// 끝까지 돌아 불합격이면 결과를 남기고 작업은 성공이다. 경고로 알린다(NV-780)
 func TestRunFailResult(t *testing.T) {
 	f := newRun(t, `{"test_id":"lt-20261020t0600-1","scenario":"smoke","result":"fail","reason":"구간 hold 에서 기준을 넘었다"}`)
-	if err := Run(context.Background(), f.env, cfg(t)); err == nil || !strings.Contains(err.Error(), "fail") {
-		t.Fatalf("불합격이면 작업이 실패해야 한다: %v", err)
+	if err := Run(context.Background(), f.env, cfg(t)); err != nil {
+		t.Fatalf("불합격도 시험 결과라 작업은 성공이다: %v", err)
+	}
+	if out := f.out.String(); !strings.Contains(out, "::warning::결과 fail") {
+		t.Fatalf("불합격은 경고로 알린다: %s", out)
+	}
+}
+
+// 판정 불가는 도구가 제대로 돌지 못한 것이라 작업이 실패한다
+func TestRunInconclusiveFails(t *testing.T) {
+	f := newRun(t, `{"test_id":"lt-20261020t0600-1","scenario":"smoke","result":"inconclusive","reason":"지표가 빠졌다"}`)
+	if err := Run(context.Background(), f.env, cfg(t)); err == nil || !strings.Contains(err.Error(), "inconclusive") {
+		t.Fatalf("판정 불가면 작업이 실패해야 한다: %v", err)
 	}
 }
 

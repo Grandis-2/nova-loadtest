@@ -98,7 +98,7 @@ nova-loadtest/
 | `runner` | 태스크당 초당 요청(처음 1,000), VU당 메모리(5MB), 태스크 크기(4 vCPU, 8GB), 여유 30%, 최대 태스크 수(`max_tasks`, Fargate vCPU 할당량에서 운영 사용분을 뺀 값) |
 | `members` | 시험 회원 ID 범위(시작 번호, 개수), 풀 B 크기(예: 1,000명), 준비 구간 속도(초당 100건 이하), 등록 대기 시간(2분) |
 | `cleanup` | 정리 전에 비어야 하는 SQS 큐 이름(등록, 취소, `preorder-events`, `order-events`), 최대 대기 30분. 이름만 두고 계정 ID는 넣지 않는다 |
-| `slo` | 판정 기준(p95 0.5초, 5xx 0.1%), 중단 기준 기본값(오류율 5%, 5xx 1%, 둘 다 1분 넘게) |
+| `slo` | 판정 기준(p95 0.5초, 5xx 0.1%). 기준을 넘어도 시험은 멈추지 않는다(NV-780) |
 | `metrics` | Mimir의 지표 이름(`k6_http_reqs_total`, queue 처리 인원의 `k6_entry_outcome_total` 등), `job`, 태스크 라벨, `le` 값. C-2에서 확정한 값으로 고친다 |
 
 ### 2.2 k6 (`k6/`)
@@ -141,7 +141,7 @@ nova-loadtest/
 - 접수의 `Idempotency-Key`는 `TEST_ID`와 회원 번호로 만든다. 같은 회원이 다시 보내도 중복 접수가 생기지 않는다.
 - 준비 구간은 `startTime` 0의 별도 시나리오다. 본 시나리오의 `startTime`은 준비 구간 + 등록 대기 시간이다. 컨트롤러가 계산해 `PLAN_JSON`에 넣는다.
 - 결제 흐름은 `REGISTERED` 예약이 없으면 요청을 보내지 않고 `skipped`로 센다. 준비가 늦었는지 결과에서 보인다.
-- 모든 태스크에 같은 임계치를 둔다: `http_req_failed: [{ threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '1m' }]`. 값은 `PLAN_JSON`의 `abort_error_rate`(%, 기본 5)를 100으로 나눠 넣는다. 누적 비율이라 늦게 걸릴 수 있다([설계 세부 "결과 합치기와 판정"](design.md#결과-합치기와-판정)).
+- 임계치(`thresholds`)를 두지 않는다. 오류가 많아도 계획한 시간까지 돈다(NV-780, [설계 세부 "결과 합치기와 판정"](design.md#결과-합치기와-판정)).
 - 기대 상태는 요청마다 `responseCallback: http.expectedStatuses(...)`로 준다(대기열 200·202, 접수 202 등). 목록은 `lib/http.js` 한 곳에 둔다. 콜백은 상태 코드만 보므로, 409처럼 오류 코드(`ACTIVE_PREORDER_EXISTS` 등)로 갈라야 하는 응답은 본문을 받아 `check`와 `error_code` 태그 카운터로 센다.
 
 **`k6-runner`**
@@ -176,8 +176,8 @@ nova-loadtest/
 | 계획 | `cmd/plan`과 같은 코드로 계획을 다시 계산하고, 러너가 넘긴 값과 다르면 멈춘다 |
 | 토큰 | 발급기 태스크를 실행하고 끝날 때까지 기다린다 |
 | 시작 | k6에 넘길 `K6_OTEL_*`를 수집 주소로 만든다(2.2). RunTask는 `RUN_TASK.tasks.<이름>`의 작업 정의 패밀리, 컨테이너 이름(`containerOverrides[].name`), 네트워크 세 키(`awsvpcConfiguration`에 그대로)와 `launchType=FARGATE`로 부른다. `START_AT`은 지금 + 2분이다. `open_at`이 있으면 `open_at` − (준비 구간 + 등록 대기)로 잡는다. k6 태스크 N 대를 실행한다. RunTask는 한 번에 10대까지라 나눠 부르고, 용량 부족 오류는 다시 시도한다. `tags`는 넘기지 않고 `startedBy`에 시험 ID를 넣는다. 뒷정리와 `stop.yml`은 `ListTasks(startedBy)`로 찾고 `DescribeTasks`의 작업 정의로 k6와 컨트롤러를 가른다. 그 시각까지 모두 RUNNING이 아니면 취소한다 |
-| 감시 | `START_AT` + 1분부터 15초마다 Mimir를 조회한다. Mimir 주소는 `OBSERVABILITY.mimir`의 클러스터와 서비스로 찾는다(`ListTasks` RUNNING → `DescribeTasks`의 ENI `privateIPv4Address`, 여럿이면 `startedAt`이 가장 늦은 것). 조회가 실패하면 다시 찾는다. 오류율이나 5xx 비율이 중단 기준을 1분 넘게 넘으면 모두 멈춘다(중단). 태스크 하나가 계획한 끝 시각 전에 99로 끝나도 나머지를 모두 멈춘다(중단). 태스크마다 `vus`의 마지막 시각을 보고, 1분 넘게 비거나 Mimir 조회가 1분 넘게 실패하면 모두 멈춘다(판정 불가) |
-| 판정 | 먼저 태스크마다 시험 구간 전체의 지표가 있는지 본다. 빠진 곳이 있으면 판정 불가로 둔다. 다 있으면 전체 구간과 유지 구간을 따로, 전체와 흐름(`name`)별로 판정한다. 결과는 합격, 불합격, 중단, 판정 불가, 한계 측정(stress), 취소 중 하나다. 취소는 부하를 보내기 전에 멈춘 경우다(시작 시각까지 RUNNING 아님, 이미지 섞임, 발급기 실패, 시작 시각이 너무 가까움). stress는 단계마다 판정해 기준을 지킨 마지막 단계를 적는다. k6 종료 코드, 태스크별 요약(`k6-<i>.json`)의 요청 수와 실패 수를 함께 적는다. 요약이 없는 태스크는 그렇다고 적는다. 실행기 CPU(Container Insights)는 아직 적지 않는다(C-5에서 더한다) |
+| 감시 | `START_AT` + 1분부터 15초마다 Mimir를 조회한다. Mimir 주소는 `OBSERVABILITY.mimir`의 클러스터와 서비스로 찾는다(`ListTasks` RUNNING → `DescribeTasks`의 ENI `privateIPv4Address`, 여럿이면 `startedAt`이 가장 늦은 것). 조회가 실패하면 다시 찾는다. 1분마다 최근 1분의 초당 요청, p95, p99, 실패율, 5xx, VU를 로그(`진행 ...`)와 결과(`progress`)에 남긴다. 기준을 넘어도 멈추지 않는다(NV-780). 태스크 하나가 일찍 끝나거나, 태스크의 `vus`가 1분 넘게 비거나, Mimir 조회가 1분 넘게 실패하면 그 일을 결과(`events`)에 적고 계속 돈다. 멈추는 것은 `stop.yml`(105)과 계획한 시간이 지나도 끝나지 않는 경우뿐이다 |
+| 판정 | 결과가 무엇이든 구간을 판정해 값을 남긴다. 도중에 멈춘 시험은 멈춘 때까지만 본다(30초 미만 구간은 뺀다). 태스크마다 구간의 지표가 있는지 보고, 빠진 곳이 있으면 판정 불가로 두되 구간 값은 남긴다. 일찍 끝난 태스크는 멈춘 시각까지만 지표를 요구한다. 전체 구간과 유지 구간을 따로, 전체와 흐름(`name`)별로 판정하고, 이름마다 초당 요청, p50·p95·p99, 실패율을 함께 적는다. 결과는 합격, 불합격, 중단, 판정 불가, 한계 측정(stress), 취소 중 하나다. 취소는 부하를 보내기 전에 멈춘 경우다(시작 시각까지 RUNNING 아님, 이미지 섞임, 발급기 실패, 시작 시각이 너무 가까움). stress는 단계마다 판정해 기준을 지킨 마지막 단계를 적는다. k6 종료 코드, 태스크별 요약(`k6-<i>.json`)의 요청 수와 실패 수를 함께 적는다. 요약이 없는 태스크는 그렇다고 적는다. 실행기 CPU(Container Insights)는 아직 적지 않는다(C-5에서 더한다) |
 | 기록 | S3 `results/<test_id>/plan.json`, `summary.json`, `summary.md`. 태스크별 `k6-<i>.json`은 `k6-runner`가 쓴다 |
 | 정리 | 토큰 파일을 지운다. 시험 데이터는 지우지 않는다 |
 | 정리 모드 | `cleanup.yml`이 `MODE=cleanup`으로 띄운다. `results/<test_id>/plan.json`에서 시험 상품 ID(`product_id`와 `prep_product_id`. spike에서는 둘이 다르다)와 회원 범위를 읽고, 두 상품을 모두 정리한다. 시험 클러스터에 다른 시험 ID의 태스크가 있으면 거절한다. `scenarios.yml`의 큐가 빌 때까지(최대 30분) SQS `GetQueueAttributes`로 기다린 뒤 정리 태스크를 실행하고, `cleanup.json`을 쓴다. 비지 않으면 정리하지 않고 실패한다. 정리 태스크에는 지금 `TEST_ID`, `PRODUCT_IDS`(쉼표로 구분), `MEMBERS`(풀 A, B, C 범위의 JSON)를 넘긴다. 이 형식은 인프라 I-6과 정한다 |
@@ -186,7 +186,9 @@ nova-loadtest/
 
 - 0.5초 안 비율: `sum(rate(<dur>_bucket{test_id="X",le="500"}[w])) / sum(rate(<dur>_count{test_id="X"}[w]))` ≥ 0.95
 - 5xx 비율: `sum(rate(<reqs>{test_id="X",status=~"5.."}[w])) / sum(rate(<reqs>{test_id="X"}[w]))` ≤ 0.001
-- 오류율(중단 기준): `sum(rate(<reqs>{test_id="X",expected_response="false"}[1m])) / sum(rate(<reqs>{test_id="X"}[1m]))`. k6의 `http_req_failed`와 같은 정의다
+- 실패율(보여 주기만 한다): `sum(rate(<reqs>{test_id="X",expected_response="false"}[1m])) / sum(rate(<reqs>{test_id="X"}[1m]))`. k6의 `http_req_failed`와 같은 정의다. 구간에서는 `sum by (name)`과 `increase`로 이름마다 구한다
+- 지연 백분위수(보여 주기만 한다): `histogram_quantile(0.95, sum by (le) (rate(<dur>_bucket{test_id="X"}[1m])))`. 구간에서는 `sum by (name, le)`와 `increase`로 이름마다, `sum by (le)`로 전체를 구한다(이름별 값을 평균하지 않는다). 버킷 사이를 직선으로 잇는 근사다
+- VU(진행 값): `sum(last_over_time(<vus>{test_id="X"}[1m]))`
 - 실제 부하: `sum(rate(<reqs>{test_id="X"}[1m]))`. 계획의 95% 미만이면 "부하 부족"으로 표시한다
 - 밀린 반복: `dropped_iterations`가 0보다 크면 VU가 모자란 것이다
 - queue 처리 인원: `sum by (outcome) (max_over_time(<outcomes>{test_id="X"}[시험 전체]))`에서 `registered` + `accepted` ≥ 인원. `<outcomes>` = `k6_entry_outcome_total`. 누적값의 최댓값을 더하는 까닭은 시계열이 처음 생긴 표본을 `increase`가 세지 않기 때문이다. `sum(max_over_time(k6_dropped_iterations_total{...}[시험 전체]))`가 0보다 크면 판정 불가다
@@ -209,7 +211,7 @@ nova-loadtest/
   - 컨트롤러: `cmd/gha run`이 SSM `run-task`와 `observability`를 읽어, 값을 컨트롤러 RunTask의 환경 변수(`RUN_TASK`, `OBSERVABILITY`)로 넘겨 띄우고 기다린다. 값은 출력하지 않고, 읽은 직후 JSON의 값마다 `::add-mask::`를 낸다. 가리지 않는 키 목록([설계 세부 "인프라 값"](design.md#인프라-값))에 없는 값은 모두 가린다. RunTask의 덮어쓰기는 모두 합쳐 8KiB까지라 `PLAN_JSON`과 함께 크기를 검사한다. 50분마다 `ACTIONS_ID_TOKEN_REQUEST_URL`로 OIDC 토큰을 다시 받아 세션을 바꾼다. 컨트롤러가 `summary.json` 없이 끝나면 판정 불가로 둔다.
   - 결과 정리: S3 결과를 실행 요약과 Slack으로 보낸다. Slack 웹훅은 GitHub 비밀이다.
   - 뒷정리: `if: always()`. 역할을 다시 받은 뒤 `startedBy=<시험 ID>`인 태스크를 모두 멈추고 토큰을 지운다.
-  - 마지막 단계에서 판정 결과가 합격이 아니면 작업을 실패로 끝낸다.
+  - 마지막 단계에서 결과가 합격, 불합격, 한계 측정이 아니면(중단, 판정 불가, 취소) 작업을 실패로 끝낸다. 불합격은 `::warning::`으로 알리고 작업은 성공이다(NV-780).
 - `stop`: `startedBy=<시험 ID>`인 k6 태스크를 멈춘다. 컨트롤러가 끝까지 남아 "중단" 결과를 쓴다. k6를 띄우기 전(토큰 발급 중)이면 컨트롤러와 발급기를 멈춰 k6가 뜨지 않게 한다. 이때는 결과가 남지 않아 판정 불가로 끝난다.
 - `cleanup`: 입력은 시험 ID 하나다. `results/<test_id>/summary.json`이 있는지 보고(끝난 시험만), `tasks.data`가 없으면 바로 실패한다. 컨트롤러를 정리 모드로 띄우고 기다린다. `startedBy`는 `<시험 ID>-c`로 해 시험 태스크와 가른다.
 - 시나리오별 워크플로는 모두 `concurrency: { group: loadtest, cancel-in-progress: false }`. 공통 실행에는 두지 않는다(같은 그룹을 두면 부르는 실행과 교착이 되어 GitHub 이 실행을 취소한다). 한 그룹에서 기다릴 수 있는 실행은 하나뿐이라, 시험이 도는 동안 두 번 넘게 실행하면 앞서 기다리던 것이 취소된다(runbook에 적는다).
@@ -301,9 +303,9 @@ nova-infra의 "PR 하나에 층 하나" 규칙을 따른다. 층 번호는 `atla
 | A-1a | GitHub 저장소 설정(저장소 관리자) | main 브랜치 보호(리뷰 필수, 코드 소유자 리뷰 필수), `loadtest` environment(승인자 지정, 배포 브랜치 main만). **B-2보다 먼저 끝낸다** |
 | A-2 | `scenarios.yml`, `cmd/plan` | 시나리오 5개의 계획이 표로 나온다. 상한 초과, 회원 부족, VU 초과가 실패하는 테스트가 있다 |
 | A-3 | k6 흐름 스크립트, Dockerfile, `k6-runner` | 로컬 be에 시험용 공개키를 넣고 smoke를 돌리면 흐름 다섯 개가 모두 성공한다. be 로그의 User-Agent가 `nova-loadtest/<시험 ID>`다. moto S3에 `k6-0.json`이 올라가고, 도중에 SIGTERM을 보내도 올라간다. `k6 inspect` 통과 |
-| A-3a | k6 안전장치 | `ci.yml`의 k6-safety 작업이 통과한다: 시험용 응답 서버가 오류를 내면 1분 뒤 99로 끝나고, 기대 상태(대기열 202 등)만 낼 때는 0으로 끝난다 |
+| A-3a | k6 안전장치 | `ci.yml`의 k6-safety 작업이 통과한다: 시험용 응답 서버가 오류를 내도 계획한 시간까지 돌아 0으로 끝나고(NV-780에서 바꿨다. 전에는 1분 뒤 99), 기대 상태(대기열 202 등)만 낼 때는 0으로 끝난다 |
 | A-4 | 토큰 발급기 | 시험용 키로 만든 토큰을 로컬 be가 받는다. `role` 고정, 범위 밖 거절, `JWT_KEY_ID`·`JWT_ISSUER`·`JWT_AUDIENCE`가 비면 실패하는 테스트가 있다. distroless 이미지가 빌드된다 |
-| A-5 | 컨트롤러 | ECS와 Mimir를 가짜로 바꾼 테스트로 결과 다섯이 모두 확인된다(한계 측정: stress 단계 3에서 기준 초과): 시작 취소, 중단(오류율, 태스크 하나 99), 판정 불가(태스크 하나의 지표 끊김, Mimir 조회 실패, 구간 누락), 이미지가 섞이면 시작 전 취소, 합격·불합격. 끝 시각에 99로 끝난 태스크는 중단으로 보지 않는다 |
+| A-5 | 컨트롤러 | ECS와 Mimir를 가짜로 바꾼 테스트로 결과 다섯이 모두 확인된다(한계 측정: stress 단계 3에서 기준 초과): 시작 취소, 중단(stop.yml), 판정 불가(태스크 하나가 일찍 끝남, 구간 누락), 이미지가 섞이면 시작 전 취소, 합격·불합격. NV-780부터는 오류율, 지표 끊김, Mimir 조회 실패로 멈추지 않는 것도 확인한다 |
 | A-6 | `loadtest.yml`, `stop.yml`, `cleanup.yml` | 로컬 Forgejo에서 7.2의 3단계 각본이 모두 기대한 결과로 끝난다 |
 
 ### B. nova-infra
@@ -383,13 +385,12 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 각본 | 가짜 ECS | 가짜 Mimir | 기대 |
 |---|---|---|---|
 | 합격 | 모두 끝 시각에 0 | 정상 | 워크플로 성공. 실행 요약에 계획 표, 전체·흐름별 결과 |
-| 불합격 | 모두 끝 시각에 0 | 결제 흐름의 0.5초 안 비율 90% | 워크플로 실패, 결과 "불합격", 흐름별 표에 결제가 걸린다 |
-| 중단(오류율) | 멈출 때까지 RUNNING | 오류율 1분 넘게 기준 초과 | 모든 k6 태스크가 StopTask 되고 실패, "중단" |
-| 중단(태스크 99) | 태스크 2가 도중에 99 | 정상 | 나머지가 StopTask 되고 "중단" |
-| 끝 시각 99 | 태스크 2가 끝 시각에 99 | 정상 | 중단이 아니다. Mimir 판정대로 "합격" |
-| 판정 불가(끊김) | RUNNING | 태스크 1의 `vus`가 1분 넘게 없음 | 모두 멈추고 실패, "판정 불가" |
-| 판정 불가(Mimir) | RUNNING | 1분 넘게 HTTP 503 | 위와 같다. obs IP 다시 찾기를 한 번 한다 |
-| 판정 불가(구간 누락) | 모두 끝 시각에 0 | 태스크 0의 지표가 중간 2분 비어 있음(감시 중에는 보이지 않게 1분 미만씩) | "판정 불가", 수치를 내지 않는다 |
+| 불합격 | 모두 끝 시각에 0 | 결제 흐름의 0.5초 안 비율 90% | 워크플로 성공(경고), 결과 "불합격", 흐름별 표에 결제가 걸린다 |
+| 높은 오류율(`high-error-rate`) | 끝 시각에 0 | 70초부터 오류율과 5xx 30% | StopTask 가 오지 않는다. 끝까지 돌아 "불합격", 워크플로는 성공(경고). 진행 값(`progress`)이 남는다(NV-780) |
+| 태스크가 일찍 끝남(`task-dies-early`) | 태스크 2가 도중에 99, 나머지는 끝 시각에 0 | 정상 | StopTask 가 오지 않는다. 나머지는 끝까지 돌고 "판정 불가", 구간 값은 남는다 |
+| 판정 불가(끊김) | 끝 시각에 0 | 태스크 1의 `vus`가 30초부터 없음 | 멈추지 않는다. "시험 도중 있었던 일"에 적고 구간 누락으로 "판정 불가" |
+| Mimir 조회 실패(`mimir-down-recovers`) | 끝 시각에 0 | 70초부터 80초 동안 HTTP 503 | 멈추지 않는다. 있었던 일에 적고, 돌아온 뒤 판정해 "합격". obs IP 다시 찾기를 한 번 한다 |
+| 판정 불가(구간 누락) | 모두 끝 시각에 0 | 태스크 0의 지표가 중간 2분 비어 있음(감시 중에는 보이지 않게 1분 미만씩) | "판정 불가", 구간 값은 참고로 남긴다 |
 | 시작 취소 | 태스크 3이 `START_AT`까지 PROVISIONING | 없음 | 띄운 태스크를 모두 멈추고 실패. Mimir를 조회하지 않는다 |
 | 발급기 실패 | 발급기 태스크가 1로 끝남 | 없음 | k6 RunTask가 한 번도 불리지 않고 실패 |
 | 관측 값 틀림 | 없음 | 없음 | moto의 `observability`에서 `otlpEndpoint`를 빼거나 `http://`를 붙인다. `cmd/gha run`이 컨트롤러를 띄우기 전에 입력 검사에서 실패하고, RunTask가 하나도 오지 않는다 |
@@ -405,8 +406,8 @@ PR의 CI는 GitHub Actions에서 돈다. 워크플로 자체(입력, 단계 순�
 | 입력 거절 | 없음 | 없음 | 아래 "계획 계산 시험"의 거절 경우마다 `plan` 작업이 실패하고 가짜 ECS에 요청이 한 번도 오지 않는다 |
 
 - 가짜 ECS는 컨테이너를 띄우지 않으므로 컨트롤러도 뜨지 않는다. 로컬에서는 `run` 작업이 컨트롤러를 작업 안에서 빌드해 바로 돌린다(`CONTROLLER_INLINE=1`, `CONTROLLER_BIN`). 컨트롤러 사망 각본은 실행기가 k6 태스크가 뜬 뒤 작업 컨테이너 안의 컨트롤러 프로세스를 SIGKILL로 끝낸다(dind 의 `docker exec`).
-- 실행기(`controller/cmd/scenarios`)의 각본 이름은 `pass`, `fail`, `abort-error-rate`, `abort-task-99`, `end-99`, `inconclusive-silent`, `inconclusive-mimir`, `inconclusive-gap`, `start-cancel`, `minter-fail`, `bad-observability`, `image-mix`, `obs-redeploy`, `manual-stop`, `cancel`, `controller-dies`, `cleanup`(큐가 빌 때까지 기다리는 경우 포함), `cleanup-refused`, `cleanup-other-test`(끝나지 않은 시험, 다른 시험이 돌 때), `input-rejected`, `stress-limit`(`-long`, 30분 넘게 걸린다)이다. 수집 주소 덮어쓰기와 실행 로그 가리기는 `pass` 각본에서 확인한다. 정리 각본은 끝난 spike 시험의 `plan.json`, `summary.json`을 moto에 만들어 두고 돈다. 큐에 메시지가 남은 각본은 30분을 기다리지 않고, 90초 뒤 큐를 비워 기다렸다가 정리하는지만 본다.
-- 확인한 것(2026-10-19): `cancel`과 `stress-limit`을 뺀 각본이 모두 기대한 결과로 끝났다. 각본 하나에 3~10분 걸린다. 돌리는 동안 노트북이 절전에 들어가면 작업이 모듈을 받다가 멈추므로 `systemd-inhibit`로 감싸 돌린다.
+- 실행기(`controller/cmd/scenarios`)의 각본 이름은 `pass`, `fail`, `high-error-rate`, `task-dies-early`, `inconclusive-silent`, `mimir-down-recovers`, `inconclusive-gap`, `start-cancel`, `minter-fail`, `bad-observability`, `image-mix`, `obs-redeploy`, `manual-stop`, `cancel`, `controller-dies`, `cleanup`(큐가 빌 때까지 기다리는 경우 포함), `cleanup-refused`, `cleanup-other-test`(끝나지 않은 시험, 다른 시험이 돌 때), `input-rejected`, `stress-limit`(`-long`, 30분 넘게 걸린다)이다. 수집 주소 덮어쓰기와 실행 로그 가리기는 `pass` 각본에서 확인한다. 정리 각본은 끝난 spike 시험의 `plan.json`, `summary.json`을 moto에 만들어 두고 돈다. 큐에 메시지가 남은 각본은 30분을 기다리지 않고, 90초 뒤 큐를 비워 기다렸다가 정리하는지만 본다.
+- 확인한 것(2026-10-19): `cancel`과 `stress-limit`을 뺀 각본이 모두 기대한 결과로 끝났다(NV-780에서 바꾼 각본 네 개는 아직 로컬 Forgejo에서 돌리지 않았다). 각본 하나에 3~10분 걸린다. 돌리는 동안 노트북이 절전에 들어가면 작업이 모듈을 받다가 멈추므로 `systemd-inhibit`로 감싸 돌린다.
 - 가짜 ECS는 실제 ECS와 다르게 동작할 수 있다. RunTask 10대 제한, `startedBy` 거르기, StopTask 뒤 STOPPED까지 걸리는 시간은 실제 동작을 문서로 확인해 넣고, 실제 ECS와 맞는지는 C-4에서 다시 본다.
 
 **4단계 흐름 시험**(로컬 be, 시험용 키쌍. 운영 키는 쓰지 않는다)

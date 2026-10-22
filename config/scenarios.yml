@@ -117,13 +117,13 @@ scenarios:
     # 입력한 인원이 한 번씩 진입해 Retry-After 간격으로 기다리고, 입장하면 접수와 등록 확인까지 간다.
     # 모두 처리되면 끝나고, duration 은 처리 기한이다. 배경 트래픽과 준비 구간이 없다
     shape: queue
-    peak_rps: 500          # 초당 진입 수. 인원 ÷ 이 값이 도착 시간이다
+    peak_rps: 500          # 초당 진입 수. 인원 ÷ 이 값이 도착 시간이다. 입력을 비웠는데 동시 인원이 max_vus 를 넘으면 넘지 않는 값으로 낮춘다
     members: 5000          # 입력 members 의 기본값
     max_members: 99980     # 시험 회원 10만 명에서 풀 A 여유(max_tasks)를 뺀 수
     deadline_margin: 3m    # duration 을 비우면 최소 처리 시간(입장 속도로 모두 들이는 시간 + 접수)에 이만큼 더한다
     max_rps: 2000
     max_duration: 30m
-    max_vus: 10000         # 동시 인원(줄에 선 회원 + 입장 뒤 접수 중인 회원)의 상한. 회원 한 명이 VU 하나를 잡는다
+    max_vus: 15000         # 동시 인원(줄에 선 회원 + 입장 뒤 접수 중인 회원)의 상한. 회원 한 명이 VU 하나를 잡는다(spike, rush 와 같다)
     waf_exempt: true
   stress:
     shape: step
@@ -177,9 +177,6 @@ series:
 slo:
   p95_ms: 500
   max_5xx_rate: 0.001
-  abort_error_rate: 5      # %, 입력 abort_error_rate 의 기본값
-  abort_5xx_rate: 1        # %
-  abort_after: 1m
 
 cleanup:
   # 정리 전에 비어야 하는 큐. 이름만 두고 계정 ID 는 넣지 않는다. 컨트롤러 역할은 이 네 큐만 볼 수 있다

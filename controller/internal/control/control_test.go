@@ -72,8 +72,8 @@ type fakeMetrics struct {
 	seen   func(at time.Time) (map[string]float64, error)
 	cov    func(start, end time.Time) map[string]float64
 	window func(start, end time.Time) map[string]mimir.Stat
-	// windowErr 가 있으면 구간 조회가 실패한다
-	windowErr error
+	// windowErr 가 오류를 돌려주는 구간은 조회가 실패한다
+	windowErr func(start time.Time) error
 	// scenarios 가 nil 이면 모든 k6 시나리오가 요청을 보냈다
 	scenarios func() map[string]float64
 	// outcomes 가 nil 이면 queue 의 members 명이 모두 등록까지 갔다
@@ -123,7 +123,9 @@ func (m *fakeMetrics) Coverage(_ context.Context, start, end time.Time) (map[str
 
 func (m *fakeMetrics) Window(_ context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error) {
 	if m.windowErr != nil {
-		return mimir.Stat{}, nil, m.windowErr
+		if err := m.windowErr(start); err != nil {
+			return mimir.Stat{}, nil, err
+		}
 	}
 	by := allFlows(0.99)
 	if m.window != nil {
@@ -373,8 +375,28 @@ func TestManualStopJudgeFails(t *testing.T) {
 		start, _ := time.Parse(time.RFC3339, env["START_AT"])
 		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(30 * time.Minute), ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
 	})
-	f.metrics.windowErr = errors.New("mimir 503")
+	f.metrics.windowErr = func(time.Time) error { return errors.New("mimir 503") }
 	expect(t, f.execute(t), report.Aborted, "mimir 503")
+}
+
+// 한 구간의 조회가 실패해도 나머지 구간 값은 남기고, 기준을 지킨 마지막 단계는 적지 않는다
+func TestWindowQueryErrorKeepsOtherWindows(t *testing.T) {
+	f := newFixture(t, "stress", nil)
+	var first time.Time
+	f.metrics.windowErr = func(start time.Time) error {
+		if first.IsZero() {
+			first = start
+		}
+		if start.Equal(first) {
+			return errors.New("mimir 503")
+		}
+		return nil
+	}
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "mimir 503")
+	if len(s.Windows) == 0 || len(s.Windows) != len(f.plan.Windows)-1 || s.LastPassingStep != "" {
+		t.Fatalf("실패한 구간만 빠져야 한다: %d개, 마지막 합격 %q", len(s.Windows), s.LastPassingStep)
+	}
 }
 
 // 끝 시각 30초 전 안에 stop.yml 로 멈춰도 판정 불가가 아니라 중단이다

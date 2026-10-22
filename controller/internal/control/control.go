@@ -180,6 +180,8 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	}
 	ws, gaps, why := judge(ctx, d, r.Config, p, startAt, to, mon.result != "", stopped)
 	if why != "" {
+		// 조회한 구간 값은 남긴다. 빠진 구간이 있어 기준을 지킨 마지막 단계는 적지 않는다
+		s.Windows = ws
 		return failed(why)
 	}
 	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
@@ -660,8 +662,10 @@ func finishedEarly(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []stri
 
 // judge는 판정 구간을 모두 판정한다. endedAt 뒤에 끝나는 구간은 partial 이면 endedAt 까지만 보고(도중에 멈춘 시험),
 // 아니면 건너뛴다. stopped 는 일찍 끝난 태스크의 멈춘 시각이고, 그 태스크는 멈춘 때까지만 지표를 요구한다.
-// 지표가 빠진 태스크는 gaps 에 적고 구간 값은 그대로 남긴다. why 는 Mimir 를 조회하지 못해 구간 값을 만들 수 없을 때의 까닭이다
+// 지표가 빠진 태스크는 gaps 에 적고 구간 값은 그대로 남긴다. why 는 Mimir 를 조회하지 못한 구간의 까닭이다.
+// 한 구간의 조회가 실패해도 나머지 구간은 판정해 돌려준다
 func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startAt, endedAt time.Time, partial bool, stopped map[int]time.Time) (out []report.Window, gaps []string, why string) {
+	var failed []string
 	for _, w := range p.Windows {
 		start := startAt.Add(time.Duration(w.Start) * time.Second)
 		end := startAt.Add(time.Duration(w.End) * time.Second)
@@ -674,7 +678,8 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		}
 		cov, err := d.Metrics.Coverage(ctx, start, end)
 		if err != nil {
-			return nil, nil, "구간 " + w.Name + "의 지표를 조회하지 못했다: " + err.Error()
+			failed = append(failed, "구간 "+w.Name+"의 지표를 조회하지 못했다: "+err.Error())
+			continue
 		}
 		for i := range p.Tasks {
 			to := end
@@ -688,7 +693,8 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		}
 		total, byName, err := d.Metrics.Window(ctx, start, end)
 		if err != nil {
-			return nil, nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
+			failed = append(failed, "구간 "+w.Name+"을 판정하지 못했다: "+err.Error())
+			continue
 		}
 		secs := end.Sub(start).Seconds()
 		rw := report.Window{Name: w.Name, Start: start, End: end, Partial: cut, Overall: check("all", total, cfg.SLO, secs)}
@@ -708,7 +714,8 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		// 있어야 한다. 준비(prepare)를 뺀 시나리오는 모든 판정 구간에 걸쳐 돈다. 준비는 판정 구간 앞에서 끝난다
 		byScenario, err := d.Metrics.Scenarios(ctx, start, end)
 		if err != nil {
-			return nil, nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
+			failed = append(failed, "구간 "+w.Name+"을 판정하지 못했다: "+err.Error())
+			continue
 		}
 		for _, s := range p.Scenarios {
 			if s.Flow != "prepare" && !(byScenario[s.Name] > 0) {
@@ -724,7 +731,7 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		}
 		out = append(out, rw)
 	}
-	return out, gaps, ""
+	return out, gaps, strings.Join(failed, "; ")
 }
 
 // flowName 은 흐름마다 반드시 보내는 요청이다(k6/lib/flows)

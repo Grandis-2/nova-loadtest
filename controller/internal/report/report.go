@@ -80,7 +80,7 @@ type Progress struct {
 	P99       Ratio     `json:"p99_ms"`
 	ErrorRate Ratio     `json:"error_rate"`
 	Rate5xx   Ratio     `json:"rate_5xx"`
-	VUs       float64   `json:"vus"`
+	VUs       Ratio     `json:"vus"` // vus 지표가 1분 넘게 없으면 NaN(null)이다
 }
 
 // Window는 판정 구간 하나의 결과다.
@@ -177,8 +177,8 @@ func (s Summary) Markdown(grafanaURL string) string {
 		fmt.Fprintf(&b, "\n**진행(최근 1분 값, %d분 간격)**\n\n| 경과 | 초당 요청 | p95 | p99 | 실패 | 5xx | VU |\n|---|---|---|---|---|---|---|\n", step)
 		for i := 0; i < len(s.Progress); i += step {
 			p := s.Progress[i]
-			fmt.Fprintf(&b, "| %s | %.1f | %s | %s | %s | %s | %.0f |\n", Clock(p.Elapsed), p.RPS, Ms(p.P95), Ms(p.P99),
-				pct(float64(p.ErrorRate)), pct(float64(p.Rate5xx)), p.VUs)
+			fmt.Fprintf(&b, "| %s | %.1f | %s | %s | %s | %s | %s |\n", Clock(p.Elapsed), p.RPS, Ms(p.P95), Ms(p.P99),
+				pct(float64(p.ErrorRate)), pct(float64(p.Rate5xx)), Count(p.VUs))
 		}
 	}
 	if len(s.Tasks) > 0 {
@@ -194,6 +194,14 @@ func (s Summary) Markdown(grafanaURL string) string {
 		}
 	}
 	return b.String()
+}
+
+// Count 는 개수다. 값이 없으면(NaN) "-"다
+func Count(v Ratio) string {
+	if f := float64(v); !math.IsNaN(f) && !math.IsInf(f, 0) {
+		return fmt.Sprintf("%.0f", f)
+	}
+	return "-"
 }
 
 // Ms 는 지연을 읽기 쉽게 쓴다. 1초가 넘으면 초로 쓴다

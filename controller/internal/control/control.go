@@ -171,19 +171,23 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 	for i, at := range mon.died {
 		stopped[i] = at
 	}
-	ws, gaps, why := judge(ctx, d, r.Config, p, startAt, to, mon.result != "", stopped)
-	if why != "" {
-		if mon.reason != "" {
-			why = mon.reason + ". " + why
+	// 도중에 멈춘 시험(stop.yml 이면 중단)은 판정 조회가 실패해도 멈춘 까닭의 결과를 지킨다
+	failed := func(why string) (*report.Summary, error) {
+		if mon.result != "" {
+			return finish(mon.result, mon.reason+". "+why)
 		}
 		return finish(report.Inconclusive, why)
+	}
+	ws, gaps, why := judge(ctx, d, r.Config, p, startAt, to, mon.result != "", stopped)
+	if why != "" {
+		return failed(why)
 	}
 	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
 	var queueWhy string
 	if p.Queue != nil && len(ws) > 0 {
 		c, inc, why := processed(ctx, d, p, startAt)
 		if why != "" {
-			return finish(report.Inconclusive, why)
+			return failed(why)
 		}
 		w := &ws[len(ws)-1]
 		w.ByName = append(w.ByName, c)
@@ -512,11 +516,11 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 		d.Logf("기록: %s", msg)
 		o.events = append(o.events, msg)
 	}
-	stop := func(res report.Result, reason string) outcome {
-		now := d.Clock.Now()
+	// at 은 판정을 끝낼 시각이다. 태스크가 멈춘 것을 늦게 보았으면 ECS 의 멈춘 시각을 넘긴다
+	stop := func(res report.Result, reason string, at time.Time) outcome {
 		d.Logf("멈춘다(%s): %s", res, reason)
 		stopAll(ctx, d, arns, reason)
-		o.result, o.reason, o.at = res, reason, now
+		o.result, o.reason, o.at = res, reason, at
 		return o
 	}
 
@@ -550,7 +554,7 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 				switch {
 				case c != nil && *c == 105:
 					// stop.yml 은 시험의 태스크를 모두 멈춘다. 사람이 멈춘 것이라 남은 태스크를 기다리지 않는다(끝 시각 근처여도 같다)
-					return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 밖에서 멈췄다(105, stop.yml)", i))
+					return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 밖에서 멈췄다(105, stop.yml)", i), at)
 				case c != nil && *c == 0 && (!early || p.Queue != nil):
 					// 끝 시각에 정상 종료했다. queue 는 맡은 회원을 모두 처리하면 처리 기한 전에 끝난다
 				case early:
@@ -571,7 +575,7 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 			}
 		}
 		if now.After(deadline) {
-			return stop(report.Inconclusive, "계획한 시간이 지나도 k6 태스크가 끝나지 않았다")
+			return stop(report.Inconclusive, "계획한 시간이 지나도 k6 태스크가 끝나지 않았다", now)
 		}
 
 		// 끊김은 15초마다 보고, 진행 값은 남길 차례에만 조회한다(조회가 실패하면 다음 확인에 다시 조회한다)
@@ -598,10 +602,10 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 			if due {
 				lastProgress = now
 				pr := report.Progress{At: now, Elapsed: int(now.Sub(startAt).Seconds()), RPS: live.RPS, P95: report.Ratio(live.P95),
-					P99: report.Ratio(live.P99), ErrorRate: report.Ratio(live.ErrorRate), Rate5xx: report.Ratio(live.Rate5xx), VUs: live.VUs}
+					P99: report.Ratio(live.P99), ErrorRate: report.Ratio(live.ErrorRate), Rate5xx: report.Ratio(live.Rate5xx), VUs: report.Ratio(live.VUs)}
 				o.progress = append(o.progress, pr)
-				d.Logf("진행 %s / %s | 초당 %.1f건 | p95 %s, p99 %s | 실패 %s, 5xx %s | VU %.0f", elapsed(now), report.Clock(p.MainEnd),
-					pr.RPS, report.Ms(pr.P95), report.Ms(pr.P99), pct(live.ErrorRate), pct(live.Rate5xx), pr.VUs)
+				d.Logf("진행 %s / %s | 초당 %.1f건 | p95 %s, p99 %s | 실패 %s, 5xx %s | VU %s", elapsed(now), report.Clock(p.MainEnd),
+					pr.RPS, report.Ms(pr.P95), report.Ms(pr.P99), pct(live.ErrorRate), pct(live.Rate5xx), report.Count(pr.VUs))
 			}
 			for i := range arns {
 				if done[i] {

@@ -150,3 +150,24 @@ func TestWindow(t *testing.T) {
 		t.Fatalf("범위는 구간 길이다: %s", rec.queries[0])
 	}
 }
+
+// 요청은 있는데 실패, 5xx, vus 시계열이 없으면 실패율과 5xx 는 0 이고 VU 는 모른다(NaN)
+func TestProgressEmptyNumerators(t *testing.T) {
+	rec := &recorder{answer: func(q string) []Sample {
+		switch {
+		case strings.HasPrefix(q, "sum(rate(k6_http_reqs_total{") && !strings.Contains(q, ") / "):
+			return []Sample{{Value: 50}}
+		case strings.HasPrefix(q, "histogram_quantile("):
+			return []Sample{{Value: 120}}
+		}
+		return nil
+	}}
+	m := Metrics{Q: rec, Names: names, TestID: "lt-20261020t0630-1"}
+	l, err := m.Progress(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.RPS != 50 || l.ErrorRate != 0 || l.Rate5xx != 0 || !math.IsNaN(l.VUs) || l.P95 != 120 {
+		t.Fatalf("진행 값 %+v", l)
+	}
+}

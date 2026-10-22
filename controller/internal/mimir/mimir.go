@@ -178,6 +178,14 @@ func (m Metrics) Progress(ctx context.Context, at time.Time) (Live, error) {
 	if math.IsNaN(l.RPS) {
 		l.RPS = 0
 	}
+	// 요청이 있는데 실패나 5xx 가 한 건도 없으면 분자 시계열이 없어 NaN 이다. 0 으로 둔다(Window 와 같다)
+	if l.RPS > 0 {
+		for _, v := range []*float64{&l.ErrorRate, &l.Rate5xx} {
+			if math.IsNaN(*v) {
+				*v = 0
+			}
+		}
+	}
 	return l, nil
 }
 

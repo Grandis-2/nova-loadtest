@@ -72,6 +72,8 @@ type fakeMetrics struct {
 	seen   func(at time.Time) (map[string]float64, error)
 	cov    func(start, end time.Time) map[string]float64
 	window func(start, end time.Time) map[string]mimir.Stat
+	// windowErr 가 있으면 구간 조회가 실패한다
+	windowErr error
 	// scenarios 가 nil 이면 모든 k6 시나리오가 요청을 보냈다
 	scenarios func() map[string]float64
 	// outcomes 가 nil 이면 queue 의 members 명이 모두 등록까지 갔다
@@ -120,6 +122,9 @@ func (m *fakeMetrics) Coverage(_ context.Context, start, end time.Time) (map[str
 }
 
 func (m *fakeMetrics) Window(_ context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error) {
+	if m.windowErr != nil {
+		return mimir.Stat{}, nil, m.windowErr
+	}
 	by := allFlows(0.99)
 	if m.window != nil {
 		by = m.window(start, end)
@@ -340,6 +345,36 @@ func TestManualStop105(t *testing.T) {
 	if len(s.Windows) != 1 || !s.Windows[0].Partial || !s.Windows[0].End.Before(s.StartAt.Add(31*time.Minute)) {
 		t.Fatalf("멈춘 때까지의 구간 하나를 남겨야 한다: %+v", s.Windows)
 	}
+}
+
+// 멈춘 것을 늦게 보아도(감시는 15초마다다) 판정 구간은 태스크가 멈춘 시각에 끝난다. smoke 의 판정 구간은 121초부터다
+func TestManualStopUsesStoppedAt(t *testing.T) {
+	var stopAt time.Time
+	f := newFixture(t, "smoke", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
+		start, _ := time.Parse(time.RFC3339, env["START_AT"])
+		stopAt = start.Add(161 * time.Second)
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: stopAt, ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	s := f.execute(t)
+	expect(t, s, report.Aborted, "stop.yml")
+	if len(s.Windows) != 1 {
+		t.Fatalf("멈춘 때까지의 구간 하나를 남겨야 한다: %+v", s.Windows)
+	}
+	for _, w := range s.Windows {
+		if w.End.After(stopAt) {
+			t.Fatalf("구간 %s 가 멈춘 시각 %s 뒤 %s 까지 간다", w.Name, stopAt, w.End)
+		}
+	}
+}
+
+// stop.yml 로 멈춘 뒤 판정 조회가 실패해도 결과는 중단이다
+func TestManualStopJudgeFails(t *testing.T) {
+	f := newFixture(t, "soak", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
+		start, _ := time.Parse(time.RFC3339, env["START_AT"])
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(30 * time.Minute), ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	f.metrics.windowErr = errors.New("mimir 503")
+	expect(t, f.execute(t), report.Aborted, "mimir 503")
 }
 
 // 끝 시각 30초 전 안에 stop.yml 로 멈춰도 판정 불가가 아니라 중단이다

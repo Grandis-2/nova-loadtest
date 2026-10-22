@@ -144,18 +144,41 @@ func (m Metrics) scalar(ctx context.Context, q string, at time.Time) (float64, e
 	return out[0].Value, nil
 }
 
-// ErrorRate는 최근 1분의 오류율이다. k6의 http_req_failed와 같은 정의다(expected_response="false"인 요청의 비율).
-func (m Metrics) ErrorRate(ctx context.Context, at time.Time) (float64, error) {
-	r := m.Names.Reqs
-	q := fmt.Sprintf(`sum(rate(%s{%s}[1m])) / sum(rate(%s{%s}[1m]))`, r, m.sel(`expected_response="false"`), r, m.sel(""))
-	return m.scalar(ctx, q, at)
+// Live 는 최근 1분의 진행 값이다. 시험 도중 1분마다 로그와 결과에 남긴다. 요청이 없으면 비율과 지연은 NaN 이다
+type Live struct {
+	RPS       float64 // 초당 요청
+	P95, P99  float64 // 지연(ms). 히스토그램 버킷 사이를 직선으로 이은 근사다
+	ErrorRate float64 // k6 의 http_req_failed 와 같은 정의다(expected_response="false"인 요청의 비율)
+	Rate5xx   float64
+	VUs       float64
 }
 
-// Rate5xx는 최근 1분의 5xx 비율이다.
-func (m Metrics) Rate5xx(ctx context.Context, at time.Time) (float64, error) {
-	r := m.Names.Reqs
-	q := fmt.Sprintf(`sum(rate(%s{%s}[1m])) / sum(rate(%s{%s}[1m]))`, r, m.sel(`status=~"5.."`), r, m.sel(""))
-	return m.scalar(ctx, q, at)
+// Progress 는 시각 at 까지 1분의 진행 값이다.
+func (m Metrics) Progress(ctx context.Context, at time.Time) (Live, error) {
+	r, d := m.Names.Reqs, m.Names.Duration
+	var l Live
+	for _, x := range []struct {
+		dst *float64
+		q   string
+	}{
+		{&l.RPS, fmt.Sprintf(`sum(rate(%s{%s}[1m]))`, r, m.sel(""))},
+		{&l.ErrorRate, fmt.Sprintf(`sum(rate(%s{%s}[1m])) / sum(rate(%s{%s}[1m]))`, r, m.sel(`expected_response="false"`), r, m.sel(""))},
+		{&l.Rate5xx, fmt.Sprintf(`sum(rate(%s{%s}[1m])) / sum(rate(%s{%s}[1m]))`, r, m.sel(`status=~"5.."`), r, m.sel(""))},
+		{&l.P95, fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(%s_bucket{%s}[1m])))`, d, m.sel(""))},
+		{&l.P99, fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(%s_bucket{%s}[1m])))`, d, m.sel(""))},
+		// vus 는 태스크마다 게이지다. 마지막 값을 더한다
+		{&l.VUs, fmt.Sprintf(`sum(last_over_time(%s{%s}[1m]))`, m.Names.VUs, m.sel(""))},
+	} {
+		v, err := m.scalar(ctx, x.q, at)
+		if err != nil {
+			return Live{}, err
+		}
+		*x.dst = v
+	}
+	if math.IsNaN(l.RPS) {
+		l.RPS = 0
+	}
+	return l, nil
 }
 
 // LastSeen은 태스크(instance)마다 vus 지표의 마지막 시각에서 지난 초를 돌려준다.
@@ -210,9 +233,24 @@ func (m Metrics) byLabel(ctx context.Context, q string, at time.Time, label stri
 
 // Stat은 구간 하나의 판정 값이다.
 type Stat struct {
-	Requests float64 `json:"requests"`
-	Within   float64 `json:"within_p95_ms"` // 0.5초 안에 끝난 비율
-	Rate5xx  float64 `json:"rate_5xx"`
+	Requests  float64 `json:"requests"`
+	Within    float64 `json:"within_p95_ms"` // 0.5초 안에 끝난 비율
+	Rate5xx   float64 `json:"rate_5xx"`
+	ErrorRate float64 `json:"error_rate"` // 기대하지 않은 응답(5xx, 4xx, 연결 실패, 시간 초과)의 비율
+	// 지연(ms). 히스토그램 버킷 사이를 직선으로 이은 근사라 판정에는 쓰지 않는다(판정은 Within)
+	P50 float64 `json:"p50_ms"`
+	P95 float64 `json:"p95_ms"`
+	P99 float64 `json:"p99_ms"`
+}
+
+// quantiles 는 백분위수와 Stat 의 칸이다
+var quantiles = []struct {
+	q   float64
+	set func(*Stat, float64)
+}{
+	{0.50, func(s *Stat, v float64) { s.P50 = v }},
+	{0.95, func(s *Stat, v float64) { s.P95 = v }},
+	{0.99, func(s *Stat, v float64) { s.P99 = v }},
 }
 
 // Window는 구간 [start, end]의 전체 값과 요청 이름(name)별 값을 돌려준다.
@@ -226,6 +264,11 @@ func (m Metrics) Window(ctx context.Context, start, end time.Time) (Stat, map[st
 			d, m.sel(le), r, d, m.sel(""), r),
 		"5xx": fmt.Sprintf(`sum by (name) (increase(%s{%s}[%s])) / sum by (name) (increase(%s{%s}[%s]))`,
 			reqs, m.sel(`status=~"5.."`), r, reqs, m.sel(""), r),
+		"error": fmt.Sprintf(`sum by (name) (increase(%s{%s}[%s])) / sum by (name) (increase(%s{%s}[%s]))`,
+			reqs, m.sel(`expected_response="false"`), r, reqs, m.sel(""), r),
+	}
+	quantile := func(q float64, by string) string {
+		return fmt.Sprintf(`histogram_quantile(%g, sum by (%s) (increase(%s_bucket{%s}[%s])))`, q, by, d, m.sel(""), r)
 	}
 	byName := map[string]Stat{}
 	set := func(kind string, f func(*Stat, float64)) error {
@@ -249,22 +292,49 @@ func (m Metrics) Window(ctx context.Context, start, end time.Time) (Stat, map[st
 	if err := set("5xx", func(s *Stat, v float64) { s.Rate5xx = v }); err != nil {
 		return Stat{}, nil, err
 	}
+	// 실패율이 없는 이름(실패가 한 건도 없으면 시계열이 없다)은 0 이다
+	for k, st := range byName {
+		st.ErrorRate = math.NaN()
+		byName[k] = st
+	}
+	if err := set("error", func(s *Stat, v float64) { s.ErrorRate = v }); err != nil {
+		return Stat{}, nil, err
+	}
+	for _, x := range quantiles {
+		queries["q"] = quantile(x.q, "name, le")
+		if err := set("q", x.set); err != nil {
+			return Stat{}, nil, err
+		}
+	}
 	// 전체는 요청 수로 가중해 합친다
 	var total Stat
-	var within, fivexx float64
+	var within, fivexx, failed float64
 	// 요청이 없는 이름의 비율은 NaN(0/0)이라 건너뛴다
-	for _, s := range byName {
+	for k, s := range byName {
+		if s.Requests > 0 && math.IsNaN(s.ErrorRate) {
+			s.ErrorRate = 0
+			byName[k] = s
+		}
 		if !(s.Requests > 0) || math.IsNaN(s.Within) || math.IsNaN(s.Rate5xx) {
 			continue
 		}
 		total.Requests += s.Requests
 		within += s.Within * s.Requests
 		fivexx += s.Rate5xx * s.Requests
+		failed += s.ErrorRate * s.Requests
 	}
 	if total.Requests > 0 {
-		total.Within, total.Rate5xx = within/total.Requests, fivexx/total.Requests
+		total.Within, total.Rate5xx, total.ErrorRate = within/total.Requests, fivexx/total.Requests, failed/total.Requests
 	} else {
-		total.Within, total.Rate5xx = math.NaN(), math.NaN()
+		total.Within, total.Rate5xx, total.ErrorRate = math.NaN(), math.NaN(), math.NaN()
+	}
+	// 백분위수는 이름별 값을 평균하지 않고 버킷을 합쳐 다시 구한다
+	for _, x := range quantiles {
+		v, err := m.scalar(ctx, quantile(x.q, "le"), end)
+		if err != nil {
+			return Stat{}, nil, err
+		}
+		x.set(&total, v)
 	}
 	return total, byName, nil
 }

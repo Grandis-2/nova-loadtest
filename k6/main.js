@@ -28,11 +28,7 @@ export const options = {
   userAgent: `nova-loadtest/${TEST_ID}`,
   tags: { test_id: TEST_ID },
   setupTimeout: '2m',
-  // 태스크마다 따로 판단하는 안전장치다. 합격 여부는 컨트롤러가 Mimir 로 정한다.
-  // 누적 비율이라 오래 정상으로 돈 뒤에는 늦게 걸린다(docs/design.md "결과 합치기와 판정")
-  thresholds: {
-    http_req_failed: [{ threshold: `rate<${PLAN.abort_error_rate / 100}`, abortOnFail: true, delayAbortEval: '1m' }],
-  },
+  // 임계치를 두지 않는다. 오류가 많아도 계획한 시간까지 돌고, 합격 여부는 컨트롤러가 Mimir 로 정한다(NV-780)
 };
 
 // 상품 상세에서 판매 중인 첫 옵션을 고른다. 접수 본문의 optionId 는 상세의 variants[].variantId 와 같은 값이다

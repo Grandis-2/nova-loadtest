@@ -39,12 +39,15 @@ func (p *Plan) Markdown() string {
 			r.NotifyIntervalSeconds, hms(r.NotifyTimeoutSeconds)))
 	}
 	if q := p.Queue; q != nil {
-		row("queue 인원", fmt.Sprintf("%d명, 진입 %s, 최소 처리 %s, 처리 기한 %s", q.Members, hms(q.ArrivalSeconds),
+		peak := fmt.Sprintf("초당 %.0f명", q.PeakRPS)
+		if q.PeakLowered {
+			peak += "(VU 상한에 맞춰 낮췄다)"
+		}
+		row("queue 인원", fmt.Sprintf("%d명, 진입 %s × %s, 최소 처리 %s, 처리 기한 %s", q.Members, peak, hms(q.ArrivalSeconds),
 			hms(q.MinSeconds), hms(q.DeadlineSeconds)))
 	}
 	row("본 시험", fmt.Sprintf("%s ~ %s (START_AT 기준)", hms(p.MainStart), hms(p.MainEnd)))
 	row("예상 시간", hms(p.Estimates.TotalSeconds))
-	row("중단 기준 오류율", fmt.Sprintf("%.1f%%", p.AbortErrorRate))
 
 	b.WriteString("\n| 흐름 | 최대 시작 수(초당) |\n|---|---|\n")
 	for _, f := range p.FlowRates {

@@ -27,19 +27,18 @@ const MaxTestIDLen = 36 - 2
 // Input은 시험 워크플로(loadtest-<시나리오>.yml)의 입력이다. 비어 있는 값은 시나리오 기본값을 쓴다.
 // 워크플로가 컨트롤러에 INPUT_JSON 으로 넘길 때 아래 JSON 이름을 쓴다.
 type Input struct {
-	TestID         string    `json:"test_id"`
-	Scenario       string    `json:"scenario"`
-	ProductID      string    `json:"product_id,omitempty"`
-	PrepProductID  string    `json:"prep_product_id,omitempty"`
-	OpenAt         string    `json:"open_at,omitempty"` // RFC 3339(UTC). 비면 바로 시작한다
-	PeakRPS        float64   `json:"peak_rps,omitempty"`
-	Duration       string    `json:"duration,omitempty"`
-	RampUp         string    `json:"ramp_up,omitempty"`
-	Runners        int       `json:"runners,omitempty"`
-	AbortErrorRate float64   `json:"abort_error_rate,omitempty"`
-	Flows          []string  `json:"flows,omitempty"`     // 비면 다섯 흐름 모두
-	Members        int       `json:"members,omitempty"`   // queue: 진입하는 인원
-	Now            time.Time `json:"planned_at,omitzero"` // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
+	TestID        string    `json:"test_id"`
+	Scenario      string    `json:"scenario"`
+	ProductID     string    `json:"product_id,omitempty"`
+	PrepProductID string    `json:"prep_product_id,omitempty"`
+	OpenAt        string    `json:"open_at,omitempty"` // RFC 3339(UTC). 비면 바로 시작한다
+	PeakRPS       float64   `json:"peak_rps,omitempty"`
+	Duration      string    `json:"duration,omitempty"`
+	RampUp        string    `json:"ramp_up,omitempty"`
+	Runners       int       `json:"runners,omitempty"`
+	Flows         []string  `json:"flows,omitempty"`     // 비면 다섯 흐름 모두
+	Members       int       `json:"members,omitempty"`   // queue: 진입하는 인원
+	Now           time.Time `json:"planned_at,omitzero"` // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
 }
 
 // Range는 회원 번호 범위 [Start, Start+Count)이다.
@@ -114,7 +113,6 @@ type Plan struct {
 	PrepProductID   string       `json:"prep_product_id,omitempty"`
 	OpenAt          string       `json:"open_at,omitempty"`
 	Multiplier      float64      `json:"multiplier"`
-	AbortErrorRate  float64      `json:"abort_error_rate"`
 	WAFExempt       bool         `json:"waf_exempt"`
 	Tasks           int          `json:"tasks"`
 	MainStart       int          `json:"main_start"` // 본 시험 시작(초, START_AT 기준)
@@ -151,10 +149,12 @@ type Rush struct {
 
 // Queue는 queue 시나리오의 인원과 시간이다. 초는 진입 시작(본 시험 시작 + 1초) 기준이다. 컨트롤러가 모두 처리되었는지 볼 때 쓴다
 type Queue struct {
-	Members         int `json:"members"`
-	ArrivalSeconds  int `json:"arrival_seconds"`  // 모두 진입하는 시간
-	MinSeconds      int `json:"min_seconds"`      // 입장 속도로 모두 들여보내고 접수까지 가는 최소 시간
-	DeadlineSeconds int `json:"deadline_seconds"` // 처리 기한(duration). k6는 이때 남은 회원을 끊는다
+	Members         int     `json:"members"`
+	PeakRPS         float64 `json:"peak_rps"`               // 초당 진입 수(입력, 비우면 기본값이나 낮춘 값)
+	PeakLowered     bool    `json:"peak_lowered,omitempty"` // peak_rps 를 비워서 동시 인원이 VU 상한 안에 들게 낮췄다
+	ArrivalSeconds  int     `json:"arrival_seconds"`        // 모두 진입하는 시간
+	MinSeconds      int     `json:"min_seconds"`            // 입장 속도로 모두 들여보내고 접수까지 가는 최소 시간
+	DeadlineSeconds int     `json:"deadline_seconds"`       // 처리 기한(duration). k6는 이때 남은 회원을 끊는다
 }
 
 // rushPayRequests는 rush에서 결제하는 회원이 알림을 받은 뒤 보내는 요청이다(알림 목록, 예약 상세, 주문, 결제 시도).
@@ -258,13 +258,6 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if err != nil {
 		fail("ramp_up: %v", err)
 	}
-	abortRate := in.AbortErrorRate
-	if abortRate == 0 {
-		abortRate = cfg.SLO.AbortErrorRate
-	}
-	if !(abortRate > 0) || abortRate > 50 {
-		fail("abort_error_rate %v는 0보다 크고 50 이하여야 한다", abortRate)
-	}
 	// 이 시나리오에서 쓰지 않는 입력은 말없이 무시하지 않고 거절한다
 	if in.Duration != "" && sc.Shape == config.ShapeStep {
 		fail("stress에는 duration을 쓰지 않는다. 단계 시간은 scenarios.yml의 step_duration이다")
@@ -292,7 +285,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 	for _, id := range []struct{ name, v string }{{"product_id", in.ProductID}, {"prep_product_id", in.PrepProductID}} {
 		if id.v != "" && !uuidRe.MatchString(id.v) {
-			fail("%s %q는 소문자 UUID여야 한다(대문자가 섞이면 서버가 400을 준다)", id.name, id.v)
+			hint := ""
+			if isFlowList(cfg, id.v) {
+				hint = ". 흐름 이름이면 flows 칸에 넣는다"
+			}
+			fail("%s %q는 소문자 UUID여야 한다(대문자가 섞이면 서버가 400을 준다)%s", id.name, id.v, hint)
 		}
 	}
 	if has("entry") && in.ProductID == "" {
@@ -337,12 +334,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	}
 
 	p := &Plan{
-		TestID:         in.TestID,
-		Scenario:       in.Scenario,
-		Flows:          flows,
-		ProductID:      in.ProductID,
-		AbortErrorRate: abortRate,
-		WAFExempt:      sc.WAFExempt,
+		TestID:    in.TestID,
+		Scenario:  in.Scenario,
+		Flows:     flows,
+		ProductID: in.ProductID,
+		WAFExempt: sc.WAFExempt,
 	}
 	if needPrep {
 		p.PrepProductID = prep
@@ -595,6 +591,12 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		p.Multiplier = 1
 		e := cfg.Flows["entry"]
 		n := float64(members)
+		// 줄에 선 회원도 VU 를 하나씩 잡는다. peak_rps 를 비웠으면 기본값과 VU 상한 안에 드는 가장 큰 값 중 작은 쪽을 쓴다
+		maxPeak, limited := queueMaxPeak(cfg, n, float64(sc.MaxVUs))
+		lowered := false
+		if in.PeakRPS == 0 && limited && maxPeak >= 1 && maxPeak < peak {
+			peak, lowered = maxPeak, true
+		}
 		arrivalS, rate, waiting, inFlight := queueLoad(cfg, n, peak)
 		admitted := math.Min(rate, cfg.AdmissionRPS)
 		minS := int(math.Ceil(n/admitted + e.IterationSeconds))
@@ -608,18 +610,10 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		}
 		dur = time.Duration(deadline) * time.Second
 		mainLen = 1 + deadline // 진입은 본 시험 시작(open_at) + 1초에 시작한다(spike, rush와 같다. 시계 어긋남)
-		p.Queue = &Queue{Members: members, ArrivalSeconds: arrivalS, MinSeconds: minS, DeadlineSeconds: deadline}
-		if math.Ceil(inFlight) > float64(sc.MaxVUs) {
-			// 줄 (r-A)·n/r 과 입장 뒤 A·iter 의 합이 상한 안인 r 은 A·n/(n-room) 이하다. 도착 시간을 올림하므로 실제
-			// 진입 수는 이 값 이하라 보통 바로 맞는다. 부동소수 오차에 대비해 계획과 같은 계산으로 확인하며 낮춘다
-			if room := float64(sc.MaxVUs) - cfg.AdmissionRPS*e.IterationSeconds; room > 0 && n > room {
-				for r := math.Floor(cfg.AdmissionRPS * n / (n - room)); r >= 1; r-- {
-					if _, _, _, f := queueLoad(cfg, n, r); math.Ceil(f) <= float64(sc.MaxVUs) {
-						vuHint = fmt.Sprintf(". %d명이면 peak_rps를 %.0f 이하로 둔다", members, r)
-						break
-					}
-				}
-			}
+		p.Queue = &Queue{Members: members, PeakRPS: peak, PeakLowered: lowered, ArrivalSeconds: arrivalS, MinSeconds: minS, DeadlineSeconds: deadline}
+		if math.Ceil(inFlight) > float64(sc.MaxVUs) && limited && maxPeak >= 1 {
+			vuHint = fmt.Sprintf(". 대기열은 초당 %.0f명만 입장시키므로 나머지는 줄에 서서 VU를 하나씩 잡는다. "+
+				"%d명이면 peak_rps를 %.0f 이하로 두거나 비운다", cfg.AdmissionRPS, members, maxPeak)
 		}
 		ph := phase{rates: map[string]float64{"entry": rate}, extraQ: waiting / cfg.PollIntervalSeconds}
 		ph.extraW = (admitted - rate) * e.AdmittedRequests
@@ -632,7 +626,12 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 				// 줄에 선 회원은 처리 기한까지 기다린다
 				GracefulStop: secs(deadline - arrivalS),
 			})
-			setVUs(&scenarios[len(scenarios)-1], inFlight, 1)
+			// 예상 동시 인원은 입장이 초당 150명으로 이어질 때다. 입장이 늦어지면 회원이 줄에 더 남으므로 VU 는 인원
+			// 전체(상한 안)까지 늘 수 있게 둔다. 모자라면 k6 가 회원을 들여보내지 못한다(운영에서 입장이 초당 약 1명일 때
+			// 7,750개로 잡은 VU 가 모자라 2,124명이 시작하지 못했다)
+			q := &scenarios[len(scenarios)-1]
+			setVUs(q, inFlight, 1)
+			q.MaxVUs = max(q.PreAllocatedVUs, min(members, sc.MaxVUs))
 			windows = append(windows, Window{"queue", ms, ms + 1 + minS})
 		}
 	}
@@ -787,7 +786,13 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 
 	// 시간
 	if dur > sc.MaxDuration.D() {
-		fail("duration %s가 %s 상한 %s를 넘는다", dur, in.Scenario, sc.MaxDuration.D())
+		if q := p.Queue; q != nil && in.Duration == "" {
+			// duration 을 비우면 처리 기한은 계산한 값이다. 입력한 값처럼 보이지 않게 계산을 보여 준다
+			fail("처리 기한 %s(최소 처리 시간 %s + 여유 %s)가 queue 상한 %s를 넘는다. 인원을 줄이거나, peak_rps가 입장 속도 %.0f보다 작으면 높인다",
+				dur, hms(q.MinSeconds), sc.DeadlineMargin.D(), sc.MaxDuration.D(), cfg.AdmissionRPS)
+		} else {
+			fail("duration %s가 %s 상한 %s를 넘는다", dur, in.Scenario, sc.MaxDuration.D())
+		}
 	}
 	if t := lead + time.Duration(total)*time.Second; t > cfg.Runner.JobLimit.D() {
 		fail("예상 시간 %s가 GitHub Actions 작업 상한 %s를 넘는다", t, cfg.Runner.JobLimit.D())
@@ -826,6 +831,35 @@ func queueLoad(cfg *config.Config, n, peak float64) (arrivalS int, rate, waiting
 	waiting = math.Max(0, (rate-cfg.AdmissionRPS)*float64(arrivalS))
 	inFlight = math.Min(n, waiting+math.Min(rate, cfg.AdmissionRPS)*cfg.Flows["entry"].IterationSeconds)
 	return
+}
+
+// queueMaxPeak 는 n명의 동시 인원이 maxVUs 안에 드는 가장 큰 정수 peak 다. 어떤 peak 로도 넘지 않으면 limited 가 false 다.
+// 줄 (r-A)·n/r 과 입장 뒤 A·iter 의 합이 상한 안인 r 은 A·n/(n-room) 이하다. 도착 시간을 올림하므로 실제 진입 수는
+// 이 값 이하라 보통 바로 맞는다. 부동소수 오차에 대비해 계획과 같은 계산으로 확인하며 낮춘다
+func queueMaxPeak(cfg *config.Config, n, maxVUs float64) (peak float64, limited bool) {
+	room := maxVUs - cfg.AdmissionRPS*cfg.Flows["entry"].IterationSeconds
+	if n <= room {
+		return 0, false
+	}
+	if room <= 0 {
+		return 0, true
+	}
+	for r := math.Floor(cfg.AdmissionRPS * n / (n - room)); r >= 1; r-- {
+		if _, _, _, f := queueLoad(cfg, n, r); math.Ceil(f) <= maxVUs {
+			return r, true
+		}
+	}
+	return 0, true
+}
+
+// isFlowList 는 v 가 흐름 이름(쉼표로 여럿)인가. product_id 칸에 flows 값을 넣은 실수를 알려 주는 데 쓴다
+func isFlowList(cfg *config.Config, v string) bool {
+	for _, f := range strings.Split(v, ",") {
+		if _, ok := cfg.Flows[strings.TrimSpace(f)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func durationOr(s string, def time.Duration) (time.Duration, error) {

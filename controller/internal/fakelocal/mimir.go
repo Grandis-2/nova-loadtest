@@ -67,8 +67,52 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 		return []sample{{Metric: map[string]string{}, Value: [2]any{ts, fmtFloat(v)}}}
 	}
 
+	// window 는 쿼리 범위가 계획의 판정 구간과 같으면 그 순번이다(아니면 -1)
+	window := -1
+	for wi, w := range p.Windows {
+		if w.End == relSec && w.End-w.Start == rng {
+			window = wi
+		}
+	}
+	errRate := func() float64 {
+		if sc.ErrorRate != nil {
+			return sc.ErrorRate(rel)
+		}
+		return 0.001
+	}
+	// 5xx 는 오류율을 바꾼 각본에서만 오류율과 같게 준다
+	rate5xx := func() float64 {
+		if sc.ErrorRate != nil {
+			return sc.ErrorRate(rel)
+		}
+		return 0
+	}
+
 	var out []sample
 	switch {
+	case strings.HasPrefix(q, "histogram_quantile("):
+		// 지연 백분위수. 0.5초 안 비율이 기준에 못 미치는 이름은 p95 가 0.5초를 넘게 준다
+		qv, _ := strconv.ParseFloat(strings.TrimSuffix(strings.SplitN(strings.TrimPrefix(q, "histogram_quantile("), ",", 2)[0], " "), 64)
+		lat := func(within float64) float64 {
+			base := map[bool]float64{true: 300, false: 900}[within >= 0.95]
+			return base * qv / 0.95
+		}
+		if !strings.Contains(q, "sum by (name, le)") {
+			out = one(lat(sc.within("", window)))
+			break
+		}
+		for _, name := range names(p.Flows) {
+			out = append(out, sample{Metric: map[string]string{"name": name}, Value: [2]any{ts, fmtFloat(lat(sc.within(name, window)))}})
+		}
+	case strings.HasPrefix(q, "sum(rate(") && !strings.Contains(q, " / "):
+		// 초당 요청(최근 1분)
+		var v float64
+		for _, fr := range p.FlowRates {
+			v += fr.PeakRPS * s.Config.Flows[fr.Flow].Requests
+		}
+		out = one(v)
+	case strings.HasPrefix(q, "sum(last_over_time("):
+		out = one(float64(10 * p.Tasks))
 	case strings.Contains(q, "time() - max by"):
 		// 태스크마다 마지막 표본이 몇 초 전인가. 시작 전이면 표본이 없다
 		for i := range p.Tasks {
@@ -101,12 +145,6 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(q, "sum(max_over_time("):
 		out = nil // 시작하지 못한 반복이 없으면 시계열이 없다
 	case strings.Contains(q, "sum by (name)"):
-		window := -1
-		for wi, w := range p.Windows {
-			if w.End == relSec && w.End-w.Start == rng {
-				window = wi
-			}
-		}
 		rates := map[string]float64{}
 		for _, fr := range p.FlowRates {
 			// 요청 수는 흐름 시작 수 × 흐름 하나의 요청 수다. 판정의 가중 평균이 계획의 흐름 비율대로 나오게 한다
@@ -119,20 +157,18 @@ func (s *Server) serveMimir(w http.ResponseWriter, r *http.Request) {
 			case strings.Contains(q, "_bucket"):
 				v = sc.within(name, window)
 			case strings.Contains(q, `status=~"5.."`):
-				v = 0
+				v = rate5xx()
+			case strings.Contains(q, `expected_response="false"`):
+				v = errRate()
 			default:
 				v = float64(rng) * rates[name]
 			}
 			out = append(out, sample{Metric: map[string]string{"name": name}, Value: [2]any{ts, fmtFloat(v)}})
 		}
 	case strings.Contains(q, `expected_response="false"`):
-		v := 0.001
-		if sc.ErrorRate != nil {
-			v = sc.ErrorRate(rel)
-		}
-		out = one(v)
+		out = one(errRate())
 	case strings.Contains(q, `status=~"5.."`):
-		out = one(0)
+		out = one(rate5xx())
 	default:
 		http.Error(w, "fake-mimir 가 모르는 쿼리: "+q, http.StatusBadRequest)
 		return

@@ -153,12 +153,10 @@ type Series struct {
 	ExtraPerTask    int `yaml:"extra_per_task"`
 }
 
+// SLO 는 합격 기준이다. 기준을 넘어도 시험은 멈추지 않고 끝까지 돈다(출시 전이라 지킬 고객이 없다. NV-780)
 type SLO struct {
-	P95MS          float64  `yaml:"p95_ms"`
-	Max5xxRate     float64  `yaml:"max_5xx_rate"`
-	AbortErrorRate float64  `yaml:"abort_error_rate"`
-	Abort5xxRate   float64  `yaml:"abort_5xx_rate"`
-	AbortAfter     Duration `yaml:"abort_after"`
+	P95MS      float64 `yaml:"p95_ms"`
+	Max5xxRate float64 `yaml:"max_5xx_rate"`
 }
 
 type Cleanup struct {
@@ -373,7 +371,7 @@ func (c *Config) Validate() error {
 	if s.Limit <= 0 || s.Names <= 0 || s.StatusesPerName <= 0 || s.Histogram <= 0 || s.CountersPerName < 0 || s.ExtraPerTask < 0 {
 		bad("series 값을 확인한다")
 	}
-	if !pos(c.SLO.P95MS, c.SLO.AbortErrorRate, c.SLO.Abort5xxRate) || !nonneg(c.SLO.Max5xxRate) || c.SLO.AbortAfter <= 0 {
+	if !pos(c.SLO.P95MS) || !nonneg(c.SLO.Max5xxRate) {
 		bad("slo 값을 확인한다")
 	}
 	// 이름이 비면 쿼리가 시험의 모든 시계열에 걸린다

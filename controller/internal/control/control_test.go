@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -65,11 +66,12 @@ func (s *memStore) DeletePrefix(_ context.Context, p string) error {
 
 // fakeMetrics 는 Mimir 각본이다. 비어 있는 함수는 정상 값을 준다
 type fakeMetrics struct {
-	tasks   int
-	errRate func(at time.Time) (float64, error)
-	seen    func(at time.Time) (map[string]float64, error)
-	cov     func(start, end time.Time) map[string]float64
-	window  func(start, end time.Time) map[string]mimir.Stat
+	tasks int
+	// live 가 nil 이면 진행 값은 정상이다
+	live   func(at time.Time) (mimir.Live, error)
+	seen   func(at time.Time) (map[string]float64, error)
+	cov    func(start, end time.Time) map[string]float64
+	window func(start, end time.Time) map[string]mimir.Stat
 	// scenarios 가 nil 이면 모든 k6 시나리오가 요청을 보냈다
 	scenarios func() map[string]float64
 	// outcomes 가 nil 이면 queue 의 members 명이 모두 등록까지 갔다
@@ -80,15 +82,20 @@ type fakeMetrics struct {
 	queried     bool
 }
 
-func (m *fakeMetrics) ErrorRate(_ context.Context, at time.Time) (float64, error) {
+func (m *fakeMetrics) Progress(_ context.Context, at time.Time) (mimir.Live, error) {
 	m.queried = true
-	if m.errRate != nil {
-		return m.errRate(at)
+	if m.live != nil {
+		return m.live(at)
 	}
-	return 0, nil
+	return mimir.Live{RPS: 100, P95: 200, P99: 400, ErrorRate: 0.001, VUs: 10}, nil
 }
 
-func (m *fakeMetrics) Rate5xx(context.Context, time.Time) (float64, error) { return 0, nil }
+// errorRate 는 오류율만 바꾼 진행 값이다
+func errorRate(f func(at time.Time) float64) func(time.Time) (mimir.Live, error) {
+	return func(at time.Time) (mimir.Live, error) {
+		return mimir.Live{RPS: 100, P95: 200, P99: 400, ErrorRate: f(at), Rate5xx: f(at), VUs: 10}, nil
+	}
+}
 
 func (m *fakeMetrics) LastSeen(_ context.Context, at time.Time) (map[string]float64, error) {
 	if m.seen != nil {
@@ -284,64 +291,89 @@ func TestFailPaymentFlow(t *testing.T) {
 	}
 }
 
-func TestAbortErrorRate(t *testing.T) {
+// 오류율이 계속 높아도 멈추지 않고 끝까지 돌아 구간을 판정한다(NV-780). 진행 값은 1분마다 남는다
+func TestHighErrorRateDoesNotStop(t *testing.T) {
 	f := newFixture(t, "smoke", nil)
-	f.metrics.errRate = func(time.Time) (float64, error) { return 0.2, nil }
+	f.metrics.live = errorRate(func(time.Time) float64 { return 0.3 })
 	s := f.execute(t)
-	expect(t, s, report.Aborted, "중단 기준")
-	if len(f.ecs.Stops) != f.plan.Tasks {
-		t.Fatalf("모든 k6 태스크를 멈춰야 한다: %v", f.ecs.Stops)
+	expect(t, s, report.Pass, "")
+	if len(f.ecs.Stops) != 0 {
+		t.Fatalf("기준을 넘어도 태스크를 멈추지 않는다: %v", f.ecs.Stops)
+	}
+	if len(s.Progress) < 2 || float64(s.Progress[0].ErrorRate) != 0.3 {
+		t.Fatalf("진행 값을 1분마다 남겨야 한다: %+v", s.Progress)
+	}
+	if md := s.Markdown(""); !strings.Contains(md, "**진행(최근 1분 값") || !strings.Contains(md, "| p50 | p95 | p99 |") {
+		t.Fatalf("결과에 진행 표와 지연 칸이 있어야 한다:\n%s", md)
 	}
 }
 
-func TestShortBreachDoesNotAbort(t *testing.T) {
-	f := newFixture(t, "smoke", nil)
-	var first time.Time
-	f.metrics.errRate = func(at time.Time) (float64, error) {
-		if first.IsZero() {
-			first = at
+// 태스크 하나가 일찍 죽어도 나머지는 계속 돈다. 계획한 부하가 아니라 판정 불가지만 구간 값은 남긴다
+func TestEarlyTaskExitKeepsRunning(t *testing.T) {
+	in := plan.Input{TestID: testID, Scenario: "smoke", ProductID: product, Duration: "2m", Runners: 3, Now: t0}
+	f := newFixtureIn(t, in, func(env map[string]string, n int, end time.Time) fakeecs.Behavior {
+		b := fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+		if n == 2 {
+			start, _ := time.Parse(time.RFC3339, env["START_AT"])
+			b.ExitAt, b.ExitCode = start.Add(3*time.Minute), 99
 		}
-		if at.Sub(first) < 45*time.Second { // 1분이 안 되게만 넘는다
-			return 0.2, nil
-		}
-		return 0, nil
+		return b
+	})
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "k6 태스크 2가 일찍 끝났다(종료 코드 99")
+	if len(f.ecs.Stops) != 0 {
+		t.Fatalf("나머지 태스크는 멈추지 않는다: %v", f.ecs.Stops)
 	}
-	expect(t, f.execute(t), report.Pass, "")
+	if len(s.Windows) != len(f.plan.Windows) || len(s.Events) == 0 {
+		t.Fatalf("구간 값과 있었던 일을 남겨야 한다: %d %v", len(s.Windows), s.Events)
+	}
 }
 
-func TestAbortTask99(t *testing.T) {
-	f := newFixture(t, "smoke", func(env map[string]string, n int, end time.Time) fakeecs.Behavior {
-		start, _ := time.Parse(time.RFC3339, env["START_AT"])
-		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(3 * time.Minute), ExitCode: 99, StopExitCode: 105, ImageDigest: "sha256:aaa"}
-	})
-	expect(t, f.execute(t), report.Aborted, "임계치로 멈췄다(99)")
-}
-
-func TestExit99AtEndIsNotAbort(t *testing.T) {
-	f := newFixture(t, "smoke", func(_ map[string]string, _ int, end time.Time) fakeecs.Behavior {
-		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end, ExitCode: 99, StopExitCode: 105, ImageDigest: "sha256:aaa"}
-	})
-	expect(t, f.execute(t), report.Pass, "")
-}
-
+// stop.yml 로 멈추면 중단이고, 멈춘 때까지의 구간 값을 남긴다
 func TestManualStop105(t *testing.T) {
-	f := newFixture(t, "smoke", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
+	f := newFixture(t, "soak", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
 		start, _ := time.Parse(time.RFC3339, env["START_AT"])
-		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(3 * time.Minute), ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(30 * time.Minute), ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+	})
+	s := f.execute(t)
+	expect(t, s, report.Aborted, "stop.yml")
+	if len(s.Windows) != 1 || !s.Windows[0].Partial || !s.Windows[0].End.Before(s.StartAt.Add(31*time.Minute)) {
+		t.Fatalf("멈춘 때까지의 구간 하나를 남겨야 한다: %+v", s.Windows)
+	}
+}
+
+// 끝 시각 30초 전 안에 stop.yml 로 멈춰도 판정 불가가 아니라 중단이다
+func TestManualStopNearEnd(t *testing.T) {
+	f := newFixture(t, "smoke", func(_ map[string]string, _ int, end time.Time) fakeecs.Behavior {
+		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end.Add(-10 * time.Second), ExitCode: 105, StopExitCode: 105, ImageDigest: "sha256:aaa"}
 	})
 	expect(t, f.execute(t), report.Aborted, "stop.yml")
 }
 
-func TestInconclusiveSilentTask(t *testing.T) {
+// 지표가 끊겨도 멈추지 않는다. 끊긴 것은 있었던 일과 구간 누락으로 남는다
+func TestSilentTaskDoesNotStop(t *testing.T) {
 	f := newFixture(t, "smoke", nil)
 	f.metrics.seen = func(time.Time) (map[string]float64, error) { return map[string]float64{}, nil } // 태스크 0 의 vus 가 없다
-	expect(t, f.execute(t), report.Inconclusive, "1분 넘게 들어오지 않았다")
+	f.metrics.cov = func(time.Time, time.Time) map[string]float64 { return map[string]float64{} }
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "지표가 빠졌다")
+	if len(f.ecs.Stops) != 0 || len(s.Windows) != 1 {
+		t.Fatalf("멈추지 않고 구간 값을 남긴다: %v %d", f.ecs.Stops, len(s.Windows))
+	}
+	if !slices.ContainsFunc(s.Events, func(e string) bool { return strings.Contains(e, "1분 넘게 들어오지 않는다") }) {
+		t.Fatalf("끊긴 것을 적어야 한다: %v", s.Events)
+	}
 }
 
-func TestInconclusiveMimirDown(t *testing.T) {
+// 시험 도중 Mimir 를 조회하지 못해도 멈추지 않는다. 끝난 뒤 조회되면 판정한다
+func TestMimirDownDoesNotStop(t *testing.T) {
 	f := newFixture(t, "smoke", nil)
-	f.metrics.errRate = func(time.Time) (float64, error) { return 0, errors.New("HTTP 503") }
-	expect(t, f.execute(t), report.Inconclusive, "Mimir 를 1분 넘게 조회하지 못했다")
+	f.metrics.live = func(time.Time) (mimir.Live, error) { return mimir.Live{}, errors.New("HTTP 503") }
+	s := f.execute(t)
+	expect(t, s, report.Pass, "")
+	if len(f.ecs.Stops) != 0 || !slices.ContainsFunc(s.Events, func(e string) bool { return strings.Contains(e, "Mimir 를 1분 넘게 조회하지 못한다") }) {
+		t.Fatalf("멈추지 않고 적어 둔다: %v %v", f.ecs.Stops, s.Events)
+	}
 }
 
 func TestInconclusiveGap(t *testing.T) {
@@ -350,7 +382,11 @@ func TestInconclusiveGap(t *testing.T) {
 		// 감시 중에는 보이지 않게 1분 미만씩 끊겨 모두 합쳐 2분이 빠졌다
 		return map[string]float64{"0": end.Sub(start).Seconds()/10 - 12}
 	}
-	expect(t, f.execute(t), report.Inconclusive, "지표가 빠졌다")
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "지표가 빠졌다")
+	if len(s.Windows) != 1 {
+		t.Fatalf("판정 불가여도 구간 값을 남긴다: %+v", s.Windows)
+	}
 }
 
 func TestCanceledNotRunning(t *testing.T) {
@@ -465,19 +501,20 @@ func TestStressLimit(t *testing.T) {
 	}
 }
 
-func TestStressAbortedByCriteriaIsLimit(t *testing.T) {
+// stress 도 오류가 많아져도 멈추지 않고 다섯 단계를 모두 돈다
+func TestStressRunsAllStepsDespiteErrors(t *testing.T) {
 	f := newFixture(t, "stress", nil)
 	mainStart := t0.Add(2*time.Minute + time.Duration(f.plan.MainStart)*time.Second)
-	f.metrics.errRate = func(at time.Time) (float64, error) {
+	f.metrics.live = errorRate(func(at time.Time) float64 {
 		if at.After(mainStart.Add(16 * time.Minute)) { // 단계 4 중간부터 오류가 많다
-			return 0.3, nil
+			return 0.3
 		}
-		return 0, nil
-	}
+		return 0
+	})
 	s := f.execute(t)
-	expect(t, s, report.Limit, "중단 기준")
-	if s.LastPassingStep != "step3" || len(s.Windows) != 3 {
-		t.Fatalf("멈추기 전에 끝난 단계(1~3)만 판정한다: %q %d", s.LastPassingStep, len(s.Windows))
+	expect(t, s, report.Limit, "")
+	if len(s.Windows) != 5 || len(f.ecs.Stops) != 0 {
+		t.Fatalf("다섯 단계를 모두 판정해야 한다: %d %v", len(s.Windows), f.ecs.Stops)
 	}
 }
 
@@ -576,24 +613,15 @@ func TestRushPasses(t *testing.T) {
 	expect(t, f.execute(t), report.Pass, "")
 }
 
-// 끝 시각 근처라도 0, 99 가 아닌 종료 코드(예: 107 스크립트 오류)는 정상 종료가 아니다
+// 끝 시각 근처라도 0 이 아닌 종료 코드(예: 107 스크립트 오류)는 정상 종료가 아니다. 구간 값은 남긴다
 func TestBadExitAtEnd(t *testing.T) {
 	f := newFixture(t, "smoke", func(_ map[string]string, _ int, end time.Time) fakeecs.Behavior {
 		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end, ExitCode: 107, StopExitCode: 105, ImageDigest: "sha256:aaa"}
 	})
-	expect(t, f.execute(t), report.Aborted, "종료 코드 107")
-}
-
-// stress 에서 k6 가 임계치(오류율)로 먼저 멈춰도 한계 측정이다
-func TestStressK6ThresholdIsLimit(t *testing.T) {
-	f := newFixture(t, "stress", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
-		start, _ := time.Parse(time.RFC3339, env["START_AT"])
-		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(18 * time.Minute), ExitCode: 99, StopExitCode: 105, ImageDigest: "sha256:aaa"}
-	})
 	s := f.execute(t)
-	expect(t, s, report.Limit, "임계치")
-	if s.LastPassingStep == "" {
-		t.Fatal("멈추기 전에 끝난 단계를 판정해야 한다")
+	expect(t, s, report.Inconclusive, "종료 코드 107")
+	if len(s.Windows) != 1 {
+		t.Fatalf("구간 값을 남긴다: %+v", s.Windows)
 	}
 }
 
@@ -636,9 +664,17 @@ func TestTaskResultWithoutSummary(t *testing.T) {
 
 // 멈춘 뒤 모든 태스크가 STOPPED 가 될 때까지 기다려 종료 코드를 남긴다
 func TestAbortRecordsExitCodes(t *testing.T) {
-	f := newFixture(t, "smoke", nil)
-	f.metrics.errRate = func(time.Time) (float64, error) { return 0.2, nil }
+	in := plan.Input{TestID: testID, Scenario: "smoke", ProductID: product, Duration: "2m", Runners: 2, Now: t0}
+	f := newFixtureIn(t, in, func(env map[string]string, n int, end time.Time) fakeecs.Behavior {
+		b := fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: end, StopExitCode: 105, ImageDigest: "sha256:aaa"}
+		if n == 0 { // stop.yml 이 태스크 0 부터 멈췄다
+			start, _ := time.Parse(time.RFC3339, env["START_AT"])
+			b.ExitAt, b.ExitCode = start.Add(2*time.Minute), 105
+		}
+		return b
+	})
 	s := f.execute(t)
+	expect(t, s, report.Aborted, "stop.yml")
 	for _, task := range s.Tasks {
 		if task.ExitCode == nil || *task.ExitCode != 105 {
 			t.Fatalf("멈춘 태스크의 종료 코드(105)를 남겨야 한다: %+v", task)
@@ -743,13 +779,13 @@ func TestQueueNotAllProcessed(t *testing.T) {
 	}
 }
 
-// queue 도 0 이 아닌 종료 코드로 일찍 끝나면 중단이다
-func TestQueueEarlyFailureAborts(t *testing.T) {
+// queue 도 0 이 아닌 종료 코드로 일찍 끝나면 계획한 부하가 아니다(판정 불가)
+func TestQueueEarlyFailureIsInconclusive(t *testing.T) {
 	f := newFixture(t, "queue", func(env map[string]string, _ int, _ time.Time) fakeecs.Behavior {
 		start, _ := time.Parse(time.RFC3339, env["START_AT"])
 		return fakeecs.Behavior{RunningAfter: 30 * time.Second, ExitAt: start.Add(90 * time.Second), ExitCode: 1, StopExitCode: 105, ImageDigest: "sha256:aaa"}
 	})
-	expect(t, f.execute(t), report.Aborted, "일찍 끝났다")
+	expect(t, f.execute(t), report.Inconclusive, "일찍 끝났다")
 }
 
 // 판정 구간(약 11분)보다 훨씬 일찍 0으로 끝난 태스크는 멈춘 때까지만 지표를 요구한다(PR #16 리뷰).
@@ -798,5 +834,17 @@ func TestQueueDroppedIsInconclusive(t *testing.T) {
 	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
 	if c.Pass || !strings.Contains(c.Note, "결과 없음 30(시작하지 못함 30") {
 		t.Fatalf("구간 값과 처리 인원은 남긴다: %+v", c)
+	}
+}
+
+// 수집 경로에서 outcome 라벨이 빠지면 결과가 이름 없이 합쳐진다. "0명 처리"로 불합격시키지 않고 판정 불가로 알린다
+func TestQueueOutcomeLabelMissing(t *testing.T) {
+	f := newFixture(t, "queue", nil)
+	f.metrics.outcomes = func() map[string]float64 { return map[string]float64{"": 3102} }
+	s := f.execute(t)
+	expect(t, s, report.Inconclusive, "outcome 라벨이 없어")
+	c := s.Windows[0].ByName[len(s.Windows[0].ByName)-1]
+	if c.Name != "queue:processed" || !strings.Contains(c.Note, "3102건에 결과 라벨(outcome)이 없다") {
+		t.Fatalf("라벨이 없다고 적어야 한다: %+v", c)
 	}
 }

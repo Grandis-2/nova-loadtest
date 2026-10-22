@@ -96,25 +96,26 @@ Actions → `loadtest <시나리오>`(예: `loadtest spike`) → Run workflow(�
 
 | 워크플로 | 보이는 입력(필수는 입력 화면에서도 비울 수 없다) |
 |---|---|
-| `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `abort_error_rate` |
-| `loadtest-load.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-spike.yml` | `product_id`(필수), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-rush.yml` | `product_id`(필수), `open_at`(필수), `peak_rps`, `duration`, `runners`, `abort_error_rate` |
-| `loadtest-queue.yml` | `product_id`(필수), `members`, `peak_rps`, `duration`, `open_at`, `runners`, `abort_error_rate` |
-| `loadtest-stress.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners`, `flows`, `abort_error_rate` |
-| `loadtest-soak.yml` | `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows`, `abort_error_rate` |
+| `loadtest-smoke.yml` | `flows`, `product_id`(`flows=catalog`면 비운다), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners` |
+| `loadtest-load.yml` | `flows`, `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `ramp_up`, `runners` |
+| `loadtest-spike.yml` | `product_id`(필수), `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners`, `flows` |
+| `loadtest-rush.yml` | `product_id`(필수), `open_at`(필수), `peak_rps`, `duration`, `runners` |
+| `loadtest-queue.yml` | `product_id`(필수), `members`, `peak_rps`, `duration`, `open_at`, `runners` |
+| `loadtest-stress.yml` | `flows`, `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `runners` |
+| `loadtest-soak.yml` | `flows`, `product_id`, `prep_product_id`, `open_at`, `peak_rps`, `duration`, `runners` |
+
+- 상품 조회만 돌릴 때는 맨 위 칸 `flows`에 `catalog`를 넣고 `product_id`는 비운다. `product_id`에 흐름 이름을 넣으면 계획이 "flows 칸에 넣는다"고 알려 주며 멈춘다.
 
 | 입력 | 내용 | 비우면 |
 |---|---|---|
 | `product_id` | 진입할 시험 상품 ID. 진입 흐름(`entry`)이 있으면 필수다. `prep_product_id`를 비우면 조회, 결제, 취소의 준비 상품도 된다(그 흐름이 있으면 둘 중 하나는 넣는다). spike, rush, queue는 입력 화면에서도 필수다 | |
 | `prep_product_id` | 준비 구간 상품. `open_at`을 넣은 spike는 필수, rush와 queue는 비운다 | `product_id` |
 | `open_at` | 판매가 열리는 시각(RFC3339, 지금부터 1시간 안). 넣으면 본 시험을 이 시각에 시작한다. rush는 필수. spike는 비우면 이미 열린 상품으로 보고 준비 구간 뒤 바로 몰린다. 그 밖의 시나리오는 비우면 바로 시작한다 | 바로 시작 |
-| `peak_rps` | 흐름 시작 수 합계(초당) | 시나리오 기본값 |
+| `peak_rps` | 흐름 시작 수 합계(초당). queue는 초당 진입 인원이다. 대기열이 초당 150명만 입장시켜 나머지는 줄에 서서 VU를 하나씩 잡으므로, 동시 인원이 VU 상한(15,000)을 넘으면 멈추고 넣을 값을 알려 준다 | 시나리오 기본값(queue는 500이고, 동시 인원이 상한을 넘으면 넘지 않는 값으로 낮춘다) |
 | `duration`, `ramp_up` | 유지 시간, 올리는 시간(예 `10m`). queue의 `duration`은 처리 기한이다 | 시나리오 기본값(queue는 최소 처리 시간 + 3분) |
 | `members` | queue에서 진입하는 인원(최대 99,980). 회원마다 한 번씩 진입한다 | 5,000 |
 | `runners` | k6 태스크 대수. 계산한 값보다 적으면 멈춘다 | 계산한 값 |
 | `flows` | 돌릴 흐름(쉼표로 구분). 상품 조회만: `catalog` | 시나리오 기본값 |
-| `abort_error_rate` | 중단할 오류율(%) | 5 |
 
 명령줄로도 실행할 수 있다.
 
@@ -140,18 +141,24 @@ gh workflow run loadtest-queue.yml --ref main -f product_id=<열린 상품> -f m
 
 ## 지켜보기
 
-- **실행 로그**: `run` 작업의 로그에 컨트롤러 로그가 `[controller]`로 옮겨진다. 토큰 발급, k6 태스크 띄우기, 시작 시각(`START_AT`), 감시, 판정 순서로 나온다
+- **실행 로그**: `run` 작업의 로그에 컨트롤러 로그가 `[controller]`로 옮겨진다(20초마다). 토큰 발급, k6 태스크 띄우기, 시작 시각(`START_AT`), 감시, 판정 순서로 나온다. 감시 중에는 1분마다 이런 줄이 나온다.
+
+  ```
+  진행 12:30 / 33:00 | 초당 192.0건 | p95 412ms, p99 980ms | 실패 0.80%, 5xx 0.10% | VU 340
+  ```
+
+  값은 최근 1분의 것이고, 경과 시간은 `START_AT`부터다(준비 구간 포함). 지표 끊김, Mimir 조회 실패, 태스크가 일찍 끝난 일은 `기록:`으로 시작하는 줄로 나온다
 - **Grafana**: 시험 대시보드(C-4에서 이름을 채운다)에서 시험 ID로 거른다. 서비스 쪽은 평소 보는 대시보드에서 지연, 5xx, 대기열 길이를 본다
+- 시험은 기준을 넘어도 멈추지 않는다(NV-780). 오류율이 높거나, 지표가 끊기거나, 태스크 하나가 일찍 죽어도 나머지는 계획한 시간까지 돌고 결과에 적힌다. 부하를 내려야 하면 직접 [멈춘다](#멈추기)
 - 컨트롤러가 스스로 멈추는 경우
-  - 오류율이나 5xx 비율이 `abort_error_rate`를 1분 넘게 넘으면 "중단"
-  - k6 태스크 하나의 지표가 1분 넘게 들어오지 않거나 Mimir를 1분 넘게 조회하지 못하면 "판정 불가"
-  - 시작 시각까지 태스크가 모두 RUNNING이 되지 않거나 이미지가 섞이면 "취소"
+  - 시작 시각까지 태스크가 모두 RUNNING이 되지 않거나 이미지가 섞이면 "취소"(부하를 보내기 전이다)
+  - 계획한 시간이 지나도 k6 태스크가 끝나지 않으면 "판정 불가"
 
 ## 멈추기
 
 | 상황 | 방법 | 결과 |
 |---|---|---|
-| 서비스가 위험하다, 부하를 바로 내려야 한다 | Actions → `stop` → `test_id` 입력. 승인 없이 바로 돈다 | k6 태스크가 멈추고 컨트롤러가 "중단" 결과를 쓴다. `loadtest` 실행은 실패로 끝난다 |
+| 서비스가 위험하다, 부하를 바로 내려야 한다 | Actions → `stop` → `test_id` 입력. 승인 없이 바로 돈다 | k6 태스크가 멈추고 컨트롤러가 "중단" 결과와 멈춘 때까지의 구간 값을 쓴다. `loadtest` 실행은 실패로 끝난다 |
 | 토큰 발급 중(k6 를 띄우기 전)에 멈춘다 | 위와 같다 | 컨트롤러와 발급기를 멈춰 k6 가 뜨지 않는다. 결과가 남지 않아 "판정 불가"로 끝난다 |
 | 워크플로를 그만 돌린다 | `loadtest` 실행 취소 | 뒷정리 단계(`if: always()`)가 태스크를 멈추고 토큰을 지운다. GitHub에서 이 동작을 C-4에서 확인한다(로컬 Forgejo는 취소하면 뒷정리를 돌리지 않는다) |
 | 위가 모두 안 된다 | 콘솔 ECS → 클러스터 `nova-prod-loadtest` → 태스크에서 시작자(`startedBy`)가 시험 ID인 태스크를 모두 중지 | 컨트롤러까지 멈추면 결과가 남지 않는다 |
@@ -161,15 +168,20 @@ gh workflow run loadtest-queue.yml --ref main -f product_id=<열린 상품> -f m
 
 ## 결과 읽기
 
-결과는 실행 요약, Slack, S3 `results/<시험 ID>/summary.json`(`summary.md`)에 있다.
+결과는 실행 요약, Slack, S3 `results/<시험 ID>/summary.json`(`summary.md`)에 있다. 결과가 무엇이든 실행 요약에는 아래가 들어간다.
+
+- **시험 도중 있었던 일**: 지표 끊김, Mimir 조회 실패, 일찍 끝난 태스크와 그 시각
+- **구간 표**: 판정 구간마다 요청 이름별 요청 수, 초당 요청, p50·p95·p99 지연, 0.5초 안 비율, 실패율(5xx, 4xx, 연결 실패, 시간 초과), 5xx 비율, 판정. 지연 백분위수는 히스토그램 버킷 사이를 직선으로 이은 근사라 판정에는 0.5초 안 비율을 쓴다. 도중에 멈춘 시험은 멈춘 때까지만 본 구간이 "구간 중간에 멈춰 멈춘 때까지만 봤다"로 나온다
+- **진행 표**: 1분마다 본 최근 1분의 초당 요청, p95, p99, 실패율, 5xx, VU(30줄이 넘으면 고르게 줄인다)
+- **k6 태스크 표**: 태스크마다 종료 코드, 보낸 요청과 실패 수
 
 | 결과 | 뜻 | 워크플로 | 다음 할 일 |
 |---|---|---|---|
 | 합격(`pass`) | 판정 구간마다 기준을 지켰다 | 성공 | 실행 기록에 남긴다 |
-| 불합격(`fail`) | 끝까지 돌았지만 기준을 넘었다 | 실패 | 흐름별 표에서 걸린 요청을 보고 서비스 쪽 원인을 찾는다 |
+| 불합격(`fail`) | 끝까지 돌았지만 기준을 넘었다 | 성공(경고) | 구간 표에서 걸린 요청의 지연과 실패율, 진행 표에서 언제부터 나빠졌는지를 보고 서비스 쪽 원인을 찾는다 |
 | 한계 측정(`limit`) | stress. 기준을 지킨 마지막 단계를 적는다 | 성공 | 마지막 합격 단계를 기록한다 |
-| 중단(`aborted`) | 중단 기준, k6 임계치(99), `stop`으로 멈췄다 | 실패 | 까닭(reason)을 본다. 서비스 문제면 원인을 찾고, 다시 돌리기 전에 승인을 다시 받는다 |
-| 판정 불가(`inconclusive`) | 지표가 끊겼거나 Mimir 를 조회하지 못했거나, 컨트롤러가 결과 없이 끝났다 | 실패 | [판정 불가일 때](#판정-불가일-때)를 본다 |
+| 중단(`aborted`) | `stop`으로 멈췄다 | 실패 | 멈춘 때까지의 구간 표를 본다. 다시 돌리기 전에 승인을 다시 받는다 |
+| 판정 불가(`inconclusive`) | 태스크가 일찍 끝났거나, 지표가 빠졌거나, Mimir 를 조회하지 못했거나, 컨트롤러가 결과 없이 끝났다. queue는 VU가 모자라 시작하지 못한 회원이 있거나 결과 라벨(`outcome`)이 없을 때도 판정 불가다 | 실패 | 구간 표는 남아 있으면 참고로 본다. [판정 불가일 때](#판정-불가일-때)를 본다 |
 | 취소(`canceled`) | 부하를 보내기 전에 멈췄다 | 실패 | 까닭을 고치고 다시 돌린다. 부하가 가지 않았으므로 사일런스만 확인한다 |
 
 ## 끝난 뒤
@@ -190,9 +202,11 @@ gh workflow run loadtest-queue.yml --ref main -f product_id=<열린 상품> -f m
 | 까닭(reason) | 먼저 볼 것 |
 |---|---|
 | 컨트롤러가 결과(summary.json) 없이 끝났다 | `run` 작업 로그의 `[controller]` 줄. 컨트롤러 태스크가 죽었으면 뒷정리가 k6 를 멈췄는지 ECS 에서 확인한다 |
-| k6 태스크 N의 지표가 1분 넘게 들어오지 않았다 | k6 태스크 로그의 내보내기 오류. 수집 주소(SSM `observability`의 `otlpEndpoint`)와 게이트웨이 상태 |
-| Mimir 를 1분 넘게 조회하지 못했다 | 관측 클러스터의 Mimir 태스크. 재배포 중이었는지 |
-| 구간 X에서 k6 태스크 N의 지표가 빠졌다 | 그 시간의 게이트웨이, Mimir 수집 상태 |
+| 계획한 부하를 끝까지 보내지 못했다: k6 태스크 N이 일찍 끝났다 | 그 태스크의 로그와 종료 코드(107 스크립트 오류, 137 메모리 부족 등). 나머지 태스크는 끝까지 돌았으니 구간 표는 부하가 줄어든 상태의 값이다 |
+| 구간 X에서 k6 태스크 N의 지표가 빠졌다 | "시험 도중 있었던 일"의 지표 끊김 시각. k6 태스크 로그의 내보내기 오류, 수집 주소(SSM `observability`의 `otlpEndpoint`), 그 시간의 게이트웨이와 Mimir 수집 상태 |
+| 구간 X의 지표를 조회하지 못했다 | 관측 클러스터의 Mimir 태스크. 재배포 중이었는지. 이때는 구간 표가 없다 |
+| k6 VU 가 모자라 N명이 진입을 시작하지 못했다(queue) | 입장이 예상(초당 150명)보다 느렸는지. 진행 표의 VU 가 상한에 닿았는지 본다 |
+| 진입 결과에 outcome 라벨이 없다(queue) | 수집 게이트웨이(nova-infra `gateway/collector.yaml`)의 `keep_keys`에 `outcome`이 있는지 |
 
 ### build.yml 이 실패했을 때
 

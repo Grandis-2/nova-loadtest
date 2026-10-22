@@ -40,8 +40,7 @@ type Store interface {
 
 // Metrics는 감시와 판정에 쓰는 지표다(mimir.Metrics).
 type Metrics interface {
-	ErrorRate(ctx context.Context, at time.Time) (float64, error)
-	Rate5xx(ctx context.Context, at time.Time) (float64, error)
+	Progress(ctx context.Context, at time.Time) (mimir.Live, error)
 	LastSeen(ctx context.Context, at time.Time) (map[string]float64, error)
 	Coverage(ctx context.Context, start, end time.Time) (map[string]float64, error)
 	Window(ctx context.Context, start, end time.Time) (mimir.Stat, map[string]mimir.Stat, error)
@@ -53,8 +52,10 @@ type Metrics interface {
 // 감시 규칙
 const (
 	monitorEvery  = 15 * time.Second
+	progressEvery = time.Minute      // 진행 값을 로그와 결과에 남기는 간격
 	monitorAfter  = time.Minute      // START_AT 뒤 이만큼 지나서 감시를 시작한다(첫 지표가 들어올 시간)
-	silentLimit   = time.Minute      // 지표가 이보다 오래 없으면 판정 불가
+	silentLimit   = time.Minute      // 지표가 이보다 오래 없으면 끊김으로 적는다(시험은 멈추지 않는다)
+	minPartial    = 30 * time.Second // 멈춘 시험에서 이보다 짧게 돈 구간은 판정하지 않는다
 	endTolerance  = 30 * time.Second // 계획한 끝 시각보다 이만큼 일찍 끝난 것까지 정상 종료로 본다
 	stopTimeout   = 2 * time.Minute  // 태스크 정의의 stopTimeout. 멈춘 뒤 요약을 올릴 시간
 	minterTimeout = 20 * time.Minute
@@ -153,59 +154,64 @@ func Execute(ctx context.Context, d Deps, r Run) (*report.Summary, error) {
 		return finish(report.Canceled, reason)
 	}
 
-	outcome := monitor(ctx, d, r, p, arns, startAt)
+	mon := monitor(ctx, d, r, p, arns, startAt)
 	// 멈춘 태스크의 종료 코드와 k6 요약은 stopTimeout 안에 나온다. 다 멈출 때까지 기다린 뒤 모은다
 	waitStopped(ctx, d, r, arns)
 	s.Tasks = taskResults(ctx, d, r, id, arns)
-	switch outcome.result {
-	case report.Inconclusive:
-		return finish(report.Inconclusive, outcome.reason)
-	case report.Aborted:
-		// stress 는 중단 기준에 걸려 멈추는 것도 정상 결과다. 멈추기 전에 끝난 단계까지 판정한다
-		if p.Scenario == "stress" && outcome.byCriteria {
-			ws, why := judge(ctx, d, r.Config, p, startAt, outcome.at, nil)
-			if why != "" {
-				return finish(report.Inconclusive, why)
-			}
-			s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
-			return finish(report.Limit, "중단 기준으로 멈췄다: "+outcome.reason)
-		}
-		return finish(report.Aborted, outcome.reason)
-	}
-	// 끝까지 돌았으면(끝 시각 30초 전 안에 끝난 것 포함) 계획한 구간을 모두 판정한다. 빠진 지표는 구간 누락으로 걸린다
+	s.Events, s.Progress = mon.events, mon.progress
+
+	// 기준을 넘어도 멈추지 않는다(NV-780). 결과가 무엇이든 구간 값을 남긴다. 끝까지 돌았으면(끝 시각 30초 전 안에
+	// 끝난 것 포함) 계획한 구간을 모두, 도중에 멈췄으면(stop.yml, 시간 초과) 멈춘 때까지를 판정한다
 	plannedEnd := startAt.Add(time.Duration(p.MainEnd) * time.Second)
-	ws, why := judge(ctx, d, r.Config, p, startAt, latest(outcome.at, plannedEnd), finishedEarly(ctx, d, r, p, arns))
+	to := mon.at
+	if mon.result == "" {
+		to = latest(mon.at, plannedEnd)
+	}
+	stopped := finishedEarly(ctx, d, r, p, arns)
+	for i, at := range mon.died {
+		stopped[i] = at
+	}
+	ws, gaps, why := judge(ctx, d, r.Config, p, startAt, to, mon.result != "", stopped)
 	if why != "" {
+		if mon.reason != "" {
+			why = mon.reason + ". " + why
+		}
 		return finish(report.Inconclusive, why)
 	}
-	if len(ws) != len(p.Windows) {
-		return finish(report.Inconclusive, fmt.Sprintf("판정 구간 %d개 중 %d개만 판정했다", len(p.Windows), len(ws)))
-	}
-	if p.Queue != nil {
-		c, dropped, why := processed(ctx, d, p, startAt)
+	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
+	var queueWhy string
+	if p.Queue != nil && len(ws) > 0 {
+		c, inc, why := processed(ctx, d, p, startAt)
 		if why != "" {
 			return finish(report.Inconclusive, why)
 		}
 		w := &ws[len(ws)-1]
 		w.ByName = append(w.ByName, c)
 		w.Pass = w.Pass && c.Pass
-		if dropped > 0 {
-			// 계획한 인원을 k6 가 보내지 못했다. 뒷단이 처리하지 못한 것과 구별해 판정하지 않는다(구간 값은 남긴다)
-			s.Windows = ws
-			return finish(report.Inconclusive, fmt.Sprintf("k6 VU 가 모자라 %.0f명이 진입을 시작하지 못했다(dropped_iterations). "+
-				"계획한 인원을 보내지 못해 판정하지 않는다. peak_rps 를 낮춰 다시 돌린다", dropped))
-		}
+		queueWhy = inc
 	}
-	s.Windows, s.LastPassingStep = ws, lastPassingStep(ws)
+	switch {
+	case mon.result != "":
+		return finish(mon.result, mon.reason)
+	case len(mon.broken) > 0:
+		return finish(report.Inconclusive, "계획한 부하를 끝까지 보내지 못했다: "+strings.Join(mon.broken, "; "))
+	case len(gaps) > 0:
+		return finish(report.Inconclusive, strings.Join(gaps, "; "))
+	case len(ws) != len(p.Windows):
+		return finish(report.Inconclusive, fmt.Sprintf("판정 구간 %d개 중 %d개만 판정했다", len(p.Windows), len(ws)))
+	case queueWhy != "":
+		// 계획한 인원을 k6 가 보내지 못했거나 결과를 셀 수 없다. 뒷단이 처리하지 못한 것과 구별해 판정하지 않는다
+		return finish(report.Inconclusive, queueWhy)
+	}
 	return finish(judgment(p, ws))
 }
 
 // processed 는 queue 에서 입력한 인원이 모두 접수까지 갔는지 본다. 등록 확인에서 REGISTERED 를 본 회원(registered)과
-// 접수만 확인한 회원(accepted)을 처리로 센다. 처리 기한에 끊긴 회원은 결과를 남기지 않아 모자란 수로 드러난다
-// 돌려주는 dropped 는 VU 가 모자라 시작하지 못한 반복 수다
-func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (report.Check, float64, string) {
+// 접수만 확인한 회원(accepted)을 처리로 센다. 처리 기한에 끊긴 회원은 결과를 남기지 않아 모자란 수로 드러난다.
+// inconclusive 는 판정하지 않을 까닭이다(VU 가 모자라 시작하지 못한 회원이 있다, 결과 라벨이 없다). why 는 조회 실패다
+func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (c report.Check, inconclusive, why string) {
 	if err := d.Clock.Sleep(ctx, ingestDelay); err != nil {
-		return report.Check{}, 0, err.Error()
+		return report.Check{}, "", err.Error()
 	}
 	end := startAt.Add(time.Duration(p.Estimates.TotalSeconds)*time.Second + stopTimeout)
 	if now := d.Clock.Now(); now.Before(end) {
@@ -213,14 +219,25 @@ func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (re
 	}
 	by, err := d.Metrics.Outcomes(ctx, startAt, end)
 	if err != nil {
-		return report.Check{}, 0, "진입 결과를 조회하지 못했다: " + err.Error()
+		return report.Check{}, "", "진입 결과를 조회하지 못했다: " + err.Error()
 	}
 	dropped, err := d.Metrics.Dropped(ctx, startAt, end)
 	if err != nil {
-		return report.Check{}, 0, "시작하지 못한 반복을 조회하지 못했다: " + err.Error()
+		return report.Check{}, "", "시작하지 못한 반복을 조회하지 못했다: " + err.Error()
+	}
+	var all float64
+	for _, v := range by {
+		all += v
+	}
+	if v := by[""]; v > 0 {
+		// 라벨이 수집 경로에서 빠지면 모든 결과가 이름 없이 하나로 합쳐진다. 처리 인원을 0 으로 보고하지 않는다
+		// (2026-10-22 운영 queue: 게이트웨이 keep_keys 에 outcome 이 없어 "0명 처리"로 나왔다)
+		c = report.Check{Name: "queue:processed", Requests: all, Note: fmt.Sprintf("진입 결과 %.0f건에 결과 라벨(outcome)이 없다", v)}
+		return c, "진입 결과에 outcome 라벨이 없어 처리 인원을 셀 수 없다. 수집 게이트웨이(nova-infra gateway/collector.yaml)의 " +
+			"keep_keys 에 outcome 이 있는지 본다", ""
 	}
 	n := by["registered"] + by["accepted"]
-	c := report.Check{Name: "queue:processed", Requests: n, Pass: n >= float64(p.Queue.Members)}
+	c = report.Check{Name: "queue:processed", Requests: n, Pass: n >= float64(p.Queue.Members)}
 	var rest []string
 	for _, k := range slices.Sorted(maps.Keys(by)) {
 		if k != "registered" && k != "accepted" && by[k] > 0 {
@@ -231,15 +248,15 @@ func processed(ctx context.Context, d Deps, p *plan.Plan, startAt time.Time) (re
 	if len(rest) > 0 {
 		c.Note += ", 실패 " + strings.Join(rest, ", ")
 	}
-	var all float64
-	for _, v := range by {
-		all += v
-	}
 	if miss := float64(p.Queue.Members) - all; miss > 0 {
 		// 결과를 남기지 않은 회원: VU 가 모자라 시작하지 못했거나(dropped_iterations) 처리 기한에 끊겼다
 		c.Note += fmt.Sprintf(", 결과 없음 %.0f(시작하지 못함 %.0f, 나머지는 처리 기한에 끊겼다)", miss, dropped)
 	}
-	return c, dropped, ""
+	if dropped > 0 {
+		inconclusive = fmt.Sprintf("k6 VU 가 모자라 %.0f명이 진입을 시작하지 못했다(dropped_iterations). "+
+			"계획한 인원을 보내지 못해 판정하지 않는다(구간 값은 남긴다)", dropped)
+	}
+	return c, inconclusive, ""
 }
 
 func latest(a, b time.Time) time.Time {
@@ -344,6 +361,14 @@ func waitStopped(ctx context.Context, d Deps, r Run, arns []string) {
 	d.Logf("k6 태스크가 %s 안에 모두 멈추지 않았다", stopTimeout+30*time.Second)
 }
 
+// exitWhy 는 종료 코드와 ECS 가 준 멈춘 까닭이다. 까닭이 없으면 코드만 쓴다
+func exitWhy(c *int32, reason string) string {
+	if reason == "" {
+		return "종료 코드 " + code(c)
+	}
+	return "종료 코드 " + code(c) + ", " + reason
+}
+
 func code(c *int32) string {
 	if c == nil {
 		return "없음"
@@ -356,7 +381,7 @@ func code(c *int32) string {
 func k6Plan(p *plan.Plan) string {
 	b, _ := json.Marshal(map[string]any{
 		"test_id": p.TestID, "flows": p.Flows, "product_id": p.ProductID, "prep_product_id": p.PrepProductID,
-		"abort_error_rate": p.AbortErrorRate, "scenarios": p.Scenarios, "open_at": p.OpenAt, "rush": p.Rush, "catalog": p.Catalog,
+		"scenarios": p.Scenarios, "open_at": p.OpenAt, "rush": p.Rush, "catalog": p.Catalog,
 	})
 	return string(b)
 }
@@ -459,34 +484,47 @@ func waitRunning(ctx context.Context, d Deps, r Run, arns []string, startAt time
 }
 
 type outcome struct {
-	result     report.Result // 비면 정상 종료
-	reason     string
-	at         time.Time // 끝난(멈춘) 시각
-	byCriteria bool      // 중단 기준(오류율, 5xx)으로 멈췄는가
+	result report.Result // 비면 계획대로 끝났다. 도중에 멈췄으면 중단(stop.yml)이나 판정 불가(시간 초과)다
+	reason string
+	at     time.Time // 끝난(멈춘) 시각
+	// broken 은 계획한 부하를 끝까지 보내지 못한 태스크다(일찍 끝났거나 0 이 아닌 코드로 끝났다). 나머지는 계속 돈다
+	broken   []string
+	died     map[int]time.Time // 일찍 끝난 태스크의 멈춘 시각. 그 뒤로는 지표를 요구하지 않는다
+	events   []string
+	progress []report.Progress
 }
 
-// monitor는 시험이 끝날 때까지 감시한다.
+// monitor는 시험이 끝날 때까지 감시한다. 기준을 넘거나 지표가 끊겨도 멈추지 않고 적어 둔다(출시 전이라 지킬 고객이
+// 없다. NV-780). 멈추는 경우는 stop.yml(사람이 멈췄다)과 계획한 시간이 지나도 끝나지 않는 경우뿐이다
 func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, startAt time.Time) outcome {
-	cfg := r.Config
 	container := r.RunTask.Tasks["k6"].Container
 	plannedEnd := startAt.Add(time.Duration(p.MainEnd) * time.Second)
 	deadline := startAt.Add(time.Duration(p.Estimates.TotalSeconds)*time.Second + stopTimeout + time.Minute)
-	abortErr := p.AbortErrorRate / 100
-	abort5xx := cfg.SLO.Abort5xxRate / 100
-	var breachSince, failSince time.Time
-	var done map[int]bool // 이미 멈춘 태스크. 지표가 끊겨도 판정 불가로 보지 않는다
+	o := outcome{died: map[int]time.Time{}}
+	done := map[int]bool{}   // 이미 멈춘 태스크. 지표가 끊겨도 적지 않는다
+	silent := map[int]bool{} // 지표 끊김을 적어 둔 태스크
+	var failSince, lastProgress time.Time
+	mimirDown := false
 
-	stop := func(res report.Result, reason string, byCriteria bool) outcome {
+	elapsed := func(at time.Time) string { return report.Clock(int(at.Sub(startAt).Seconds())) }
+	note := func(at time.Time, format string, a ...any) {
+		msg := elapsed(at) + " " + fmt.Sprintf(format, a...)
+		d.Logf("기록: %s", msg)
+		o.events = append(o.events, msg)
+	}
+	stop := func(res report.Result, reason string) outcome {
 		now := d.Clock.Now()
 		d.Logf("멈춘다(%s): %s", res, reason)
 		stopAll(ctx, d, arns, reason)
-		return outcome{res, reason, now, byCriteria}
+		o.result, o.reason, o.at = res, reason, now
+		return o
 	}
 
 	// 첫 지표가 들어올 때까지 기다린다(k6 내보내기 간격 10초)
 	if wait := startAt.Add(monitorAfter).Sub(d.Clock.Now()); wait > 0 {
 		if err := d.Clock.Sleep(ctx, wait); err != nil {
-			return outcome{report.Inconclusive, err.Error(), d.Clock.Now(), false}
+			o.result, o.reason, o.at = report.Inconclusive, err.Error(), d.Clock.Now()
+			return o
 		}
 	}
 	for {
@@ -494,66 +532,76 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 		states, err := d.Runner.Describe(ctx, arns, container)
 		if err == nil {
 			stopped := 0
-			done = map[int]bool{}
 			for i, s := range states {
 				if s.LastStatus != "STOPPED" {
 					continue
 				}
 				stopped++
-				done[i] = true
-				// queue는 맡은 회원을 모두 처리하면 처리 기한 전에 끝난다. 정상 종료(0)는 일찍 끝나도 중단이 아니다
-				if p.Queue != nil && s.ExitCode != nil && *s.ExitCode == 0 {
+				if done[i] {
 					continue
 				}
-				// 계획한 끝 시각보다 일찍 끝난 태스크가 있으면 남은 태스크만으로는 계획한 부하가 아니다
-				if now.Before(plannedEnd.Add(-endTolerance)) {
-					switch c := s.ExitCode; {
-					case c != nil && *c == 99:
-						// k6 임계치는 컨트롤러의 오류율 중단 기준과 같은 기준이다. stress 에서는 한계 측정으로 본다
-						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 임계치로 멈췄다(99)", i), true)
-					case c != nil && *c == 105:
-						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 밖에서 멈췄다(105, stop.yml)", i), false)
-					default:
-						return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 일찍 끝났다(종료 코드 %s, %s)", i, code(c), s.StoppedReason), false)
-					}
+				done[i] = true
+				at := now
+				if s.StoppedAt != nil {
+					at = *s.StoppedAt
+				}
+				early := now.Before(plannedEnd.Add(-endTolerance))
+				c := s.ExitCode
+				switch {
+				case c != nil && *c == 105:
+					// stop.yml 은 시험의 태스크를 모두 멈춘다. 사람이 멈춘 것이라 남은 태스크를 기다리지 않는다(끝 시각 근처여도 같다)
+					return stop(report.Aborted, fmt.Sprintf("k6 태스크 %d가 밖에서 멈췄다(105, stop.yml)", i))
+				case c != nil && *c == 0 && (!early || p.Queue != nil):
+					// 끝 시각에 정상 종료했다. queue 는 맡은 회원을 모두 처리하면 처리 기한 전에 끝난다
+				case early:
+					// 남은 태스크는 계속 돌린다. 계획한 부하는 아니므로 결과는 판정 불가지만 구간 값은 남는다
+					o.died[i] = at
+					msg := fmt.Sprintf("k6 태스크 %d가 일찍 끝났다(%s)", i, exitWhy(c, s.StoppedReason))
+					o.broken = append(o.broken, msg)
+					note(at, "%s. 나머지 태스크는 계속 돈다", msg)
+				default:
+					msg := fmt.Sprintf("k6 태스크 %d가 끝 시각에 정상이 아닌 코드로 끝났다(%s)", i, exitWhy(c, s.StoppedReason))
+					o.broken = append(o.broken, msg)
+					note(at, "%s", msg)
 				}
 			}
 			if stopped == len(states) {
-				// 끝 시각 근처에 끝났어도 0(정상)과 99(임계치, 판정은 Mimir 로 한다)가 아니면 정상 종료가 아니다
-				for i, s := range states {
-					if c := s.ExitCode; c == nil || (*c != 0 && *c != 99) {
-						return outcome{report.Aborted, fmt.Sprintf("k6 태스크 %d가 종료 코드 %s로 끝났다(%s)", i, code(c), s.StoppedReason), now, false}
-					}
-				}
-				return outcome{at: now}
+				o.at = now
+				return o
 			}
 		}
 		if now.After(deadline) {
-			return stop(report.Inconclusive, "계획한 시간이 지나도 k6 태스크가 끝나지 않았다", false)
+			return stop(report.Inconclusive, "계획한 시간이 지나도 k6 태스크가 끝나지 않았다")
 		}
 
-		er, err1 := d.Metrics.ErrorRate(ctx, now)
-		r5, err2 := d.Metrics.Rate5xx(ctx, now)
-		seen, err3 := d.Metrics.LastSeen(ctx, now)
-		if err := errors.Join(err1, err2, err3); err != nil {
+		// 끊김은 15초마다 보고, 진행 값은 남길 차례에만 조회한다(조회가 실패하면 다음 확인에 다시 조회한다)
+		seen, err := d.Metrics.LastSeen(ctx, now)
+		var live mimir.Live
+		due := now.Sub(lastProgress) >= progressEvery
+		if err == nil && due {
+			live, err = d.Metrics.Progress(ctx, now)
+		}
+		if err != nil {
 			if failSince.IsZero() {
 				failSince = now
 			}
-			if now.Sub(failSince) > silentLimit {
-				return stop(report.Inconclusive, "Mimir 를 1분 넘게 조회하지 못했다: "+err.Error(), false)
+			if now.Sub(failSince) > silentLimit && !mimirDown {
+				mimirDown = true
+				note(now, "Mimir 를 1분 넘게 조회하지 못한다(%v). 시험은 계속 돈다", err)
 			}
 		} else {
+			if mimirDown {
+				mimirDown = false
+				note(now, "Mimir 조회가 돌아왔다")
+			}
 			failSince = time.Time{}
-			// NaN(요청 없음)은 넘지 않은 것으로 본다
-			if er > abortErr || r5 > abort5xx {
-				if breachSince.IsZero() {
-					breachSince = now
-				}
-				if now.Sub(breachSince) > cfg.SLO.AbortAfter.D() {
-					return stop(report.Aborted, fmt.Sprintf("중단 기준을 1분 넘게 넘었다(오류율 %s, 5xx %s)", pct(er), pct(r5)), true)
-				}
-			} else {
-				breachSince = time.Time{}
+			if due {
+				lastProgress = now
+				pr := report.Progress{At: now, Elapsed: int(now.Sub(startAt).Seconds()), RPS: live.RPS, P95: report.Ratio(live.P95),
+					P99: report.Ratio(live.P99), ErrorRate: report.Ratio(live.ErrorRate), Rate5xx: report.Ratio(live.Rate5xx), VUs: live.VUs}
+				o.progress = append(o.progress, pr)
+				d.Logf("진행 %s / %s | 초당 %.1f건 | p95 %s, p99 %s | 실패 %s, 5xx %s | VU %.0f", elapsed(now), report.Clock(p.MainEnd),
+					pr.RPS, report.Ms(pr.P95), report.Ms(pr.P99), pct(live.ErrorRate), pct(live.Rate5xx), pr.VUs)
 			}
 			for i := range arns {
 				if done[i] {
@@ -563,13 +611,19 @@ func monitor(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string, st
 				if !ok || math.IsNaN(age) {
 					age = now.Sub(startAt).Seconds()
 				}
-				if age > silentLimit.Seconds() && now.Before(plannedEnd) {
-					return stop(report.Inconclusive, fmt.Sprintf("k6 태스크 %d의 지표가 1분 넘게 들어오지 않았다", i), false)
+				switch {
+				case age > silentLimit.Seconds() && now.Before(plannedEnd) && !silent[i]:
+					silent[i] = true
+					note(now, "k6 태스크 %d의 지표가 1분 넘게 들어오지 않는다. 시험은 계속 돈다", i)
+				case age <= silentLimit.Seconds() && silent[i]:
+					silent[i] = false
+					note(now, "k6 태스크 %d의 지표가 다시 들어온다", i)
 				}
 			}
 		}
 		if err := d.Clock.Sleep(ctx, monitorEvery); err != nil {
-			return outcome{report.Inconclusive, err.Error(), d.Clock.Now(), false}
+			o.result, o.reason, o.at = report.Inconclusive, err.Error(), d.Clock.Now()
+			return o
 		}
 	}
 }
@@ -582,16 +636,16 @@ func pct(v float64) string {
 }
 
 // finishedEarly 는 queue 에서 맡은 회원을 모두 처리하고 0으로 끝난 태스크의 멈춘 시각이다. 그 뒤로는 지표가 없다.
-// queue 가 아니면 nil 이다
+// queue 가 아니면 비어 있다
 func finishedEarly(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []string) map[int]time.Time {
+	out := map[int]time.Time{}
 	if p.Queue == nil {
-		return nil
+		return out
 	}
 	states, err := d.Runner.Describe(context.WithoutCancel(ctx), arns, r.RunTask.Tasks["k6"].Container)
 	if err != nil {
-		return nil // 모르면 구간 전체를 요구한다(판정 불가 쪽으로 기운다)
+		return out // 모르면 구간 전체를 요구한다(판정 불가 쪽으로 기운다)
 	}
-	out := map[int]time.Time{}
 	for i, s := range states {
 		if s.LastStatus == "STOPPED" && s.ExitCode != nil && *s.ExitCode == 0 && s.StoppedAt != nil {
 			out[i] = *s.StoppedAt
@@ -600,20 +654,23 @@ func finishedEarly(ctx context.Context, d Deps, r Run, p *plan.Plan, arns []stri
 	return out
 }
 
-// judge는 끝난 판정 구간을 모두 판정한다. 구간에 지표가 빠진 태스크가 있으면 판정 불가다.
-// stopped 는 일찍 정상 종료한 태스크의 멈춘 시각이고(queue), 그 태스크는 멈춘 때까지만 지표를 요구한다.
-// 돌려주는 reason 은 판정 불가일 때의 까닭이다.
-func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startAt, endedAt time.Time, stopped map[int]time.Time) ([]report.Window, string) {
-	var out []report.Window
+// judge는 판정 구간을 모두 판정한다. endedAt 뒤에 끝나는 구간은 partial 이면 endedAt 까지만 보고(도중에 멈춘 시험),
+// 아니면 건너뛴다. stopped 는 일찍 끝난 태스크의 멈춘 시각이고, 그 태스크는 멈춘 때까지만 지표를 요구한다.
+// 지표가 빠진 태스크는 gaps 에 적고 구간 값은 그대로 남긴다. why 는 Mimir 를 조회하지 못해 구간 값을 만들 수 없을 때의 까닭이다
+func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startAt, endedAt time.Time, partial bool, stopped map[int]time.Time) (out []report.Window, gaps []string, why string) {
 	for _, w := range p.Windows {
 		start := startAt.Add(time.Duration(w.Start) * time.Second)
 		end := startAt.Add(time.Duration(w.End) * time.Second)
+		cut := false
 		if end.After(endedAt) {
-			continue // 멈추기 전에 끝나지 않은 구간(stress)
+			if !partial || endedAt.Sub(start) < minPartial {
+				continue // 멈추기 전에 시작하지 않았거나 너무 짧게 돈 구간
+			}
+			end, cut = endedAt.Truncate(time.Second), true
 		}
 		cov, err := d.Metrics.Coverage(ctx, start, end)
 		if err != nil {
-			return nil, "구간 " + w.Name + "의 지표를 조회하지 못했다: " + err.Error()
+			return nil, nil, "구간 " + w.Name + "의 지표를 조회하지 못했다: " + err.Error()
 		}
 		for i := range p.Tasks {
 			to := end
@@ -622,14 +679,15 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 			}
 			want := to.Sub(start).Seconds()/exportEvery - coverageSlack
 			if got := cov[strconv.Itoa(i)]; got < want {
-				return nil, fmt.Sprintf("구간 %s에서 k6 태스크 %d의 지표가 빠졌다(표본 %.0f개, 기대 %.0f개 이상)", w.Name, i, got, want)
+				gaps = append(gaps, fmt.Sprintf("구간 %s에서 k6 태스크 %d의 지표가 빠졌다(표본 %.0f개, 기대 %.0f개 이상)", w.Name, i, got, want))
 			}
 		}
 		total, byName, err := d.Metrics.Window(ctx, start, end)
 		if err != nil {
-			return nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
+			return nil, nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
 		}
-		rw := report.Window{Name: w.Name, Start: start, End: end, Overall: check("all", total, cfg.SLO)}
+		secs := end.Sub(start).Seconds()
+		rw := report.Window{Name: w.Name, Start: start, End: end, Partial: cut, Overall: check("all", total, cfg.SLO, secs)}
 		if !(total.Requests > 0) {
 			rw.Overall.Pass, rw.Overall.Note = false, "요청이 없다"
 		}
@@ -646,7 +704,7 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 		// 있어야 한다. 준비(prepare)를 뺀 시나리오는 모든 판정 구간에 걸쳐 돈다. 준비는 판정 구간 앞에서 끝난다
 		byScenario, err := d.Metrics.Scenarios(ctx, start, end)
 		if err != nil {
-			return nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
+			return nil, nil, "구간 " + w.Name + "을 판정하지 못했다: " + err.Error()
 		}
 		for _, s := range p.Scenarios {
 			if s.Flow != "prepare" && !(byScenario[s.Name] > 0) {
@@ -655,14 +713,14 @@ func judge(ctx context.Context, d Deps, cfg *config.Config, p *plan.Plan, startA
 			}
 		}
 		for _, name := range sortedNames(byName) {
-			c := check(name, byName[name], cfg.SLO)
+			c := check(name, byName[name], cfg.SLO, secs)
 			rw.ByName = append(rw.ByName, c)
 			// 흐름별 기준도 지켜야 합격이다(전체의 80% 가까이가 상품 조회라 전체만 보면 가려진다)
 			rw.Pass = rw.Pass && c.Pass
 		}
 		out = append(out, rw)
 	}
-	return out, ""
+	return out, gaps, ""
 }
 
 // flowName 은 흐름마다 반드시 보내는 요청이다(k6/lib/flows)
@@ -676,8 +734,13 @@ var flowName = map[string]string{
 
 // check 는 기준 하나를 판정한다. p95 판정은 "0.5초 안에 끝난 요청이 95% 이상인가"다. 500ms 가 히스토그램 버킷
 // 경계라 이 비율은 근사 없이 정확하다(docs/design.md "결과 합치기와 판정"). 경계는 metrics.le_500 이다
-func check(name string, st mimir.Stat, slo config.SLO) report.Check {
-	c := report.Check{Name: name, Requests: st.Requests, Within: report.Ratio(st.Within), Rate5xx: report.Ratio(st.Rate5xx)}
+// 지연 백분위수, 실패율, 초당 요청은 보여 주기만 하고 판정에 쓰지 않는다. secs 는 구간 길이다
+func check(name string, st mimir.Stat, slo config.SLO, secs float64) report.Check {
+	c := report.Check{Name: name, Requests: st.Requests, Within: report.Ratio(st.Within), Rate5xx: report.Ratio(st.Rate5xx),
+		ErrorRate: report.Ratio(st.ErrorRate), P50: report.Ratio(st.P50), P95: report.Ratio(st.P95), P99: report.Ratio(st.P99)}
+	if secs > 0 && st.Requests > 0 {
+		c.RPS = st.Requests / secs
+	}
 	if !(st.Requests > 0) {
 		// 요청이 없으면 이 이름은 판정하지 않는다
 		c.Pass = true
@@ -700,7 +763,8 @@ func sortedNames(m map[string]mimir.Stat) []string {
 func lastPassingStep(ws []report.Window) string {
 	last := ""
 	for _, w := range ws {
-		if !w.Pass {
+		// 도중에 멈춰 끝까지 보지 못한 단계는 기준을 지켰다고 하지 않는다
+		if !w.Pass || w.Partial {
 			break
 		}
 		if strings.HasPrefix(w.Name, "step") {

@@ -88,7 +88,7 @@ flowchart LR
 
 | 환경 변수 | 쓰는 명령 | 내용 |
 |---|---|---|
-| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_MEMBERS`, `LT_ABORT_ERROR_RATE` | `plan`, `run` | 시험 워크플로의 입력(`LT_SCENARIO`는 시나리오별 워크플로가 정한다). 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_MEMBERS`는 queue의 인원이다. `LT_ABORT_ERROR_RATE`는 퍼센트다(5는 5%) |
+| `LT_SCENARIO`, `LT_PRODUCT_ID`, `LT_PREP_PRODUCT_ID`, `LT_OPEN_AT`, `LT_PEAK_RPS`, `LT_DURATION`, `LT_RAMP_UP`, `LT_RUNNERS`, `LT_FLOWS`, `LT_MEMBERS` | `plan`, `run` | 시험 워크플로의 입력(`LT_SCENARIO`는 시나리오별 워크플로가 정한다). 비우면 `scenarios.yml`의 기본값이다. `LT_FLOWS`는 쉼표로 구분한다. `LT_MEMBERS`는 queue의 인원이다 |
 | `TEST_ID` | `run`, `after`, `stop`, `cleanup` | 시험 ID. `run`, `after`는 `plan` 작업의 출력을 받고, `stop`, `cleanup`은 입력을 받아 형식을 검사한다 |
 | `PLANNED_AT` | `run` | `plan` 작업이 계획한 시각(RFC3339). `run`은 이 시각으로 계획을 다시 계산해 `INPUT_JSON`의 `planned_at`에 넣는다 |
 | `AWS_ROLE_ARN` | `plan`(이미지 확인), 나머지 모두 | 맡을 역할. GitHub 비밀 `AWS_BUILD_ROLE_ARN` 또는 `AWS_RUN_ROLE_ARN`에서 받는다. `ACTIONS_ID_TOKEN_REQUEST_URL`이 있을 때만 맡고, 세션이 끝나기 10분 전에 OIDC 토큰을 다시 받아 세션을 바꾼다 |
@@ -143,4 +143,4 @@ flowchart LR
 
 ## 이 저장소의 설정
 
-`config/scenarios.yml` 하나에 모두 있다. 흐름 비율, 시나리오 기본값과 상한, 실행기 크기, 시험 회원 범위, 시계열 상한, SLO와 중단 기준, 정리 전에 볼 큐(`preorder-register`, `preorder-cancel`, `preorder-events`, `order-events`), Mimir 지표 이름이다. 각 항목의 뜻은 [구현 계획 2.1](implementation-plan.md#21-configscenariosyml)에 있다.
+`config/scenarios.yml` 하나에 모두 있다. 흐름 비율, 시나리오 기본값과 상한, 실행기 크기, 시험 회원 범위, 시계열 상한, SLO(판정 기준), 정리 전에 볼 큐(`preorder-register`, `preorder-cancel`, `preorder-events`, `order-events`), Mimir 지표 이름이다. 각 항목의 뜻은 [구현 계획 2.1](implementation-plan.md#21-configscenariosyml)에 있다.

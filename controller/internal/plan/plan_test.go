@@ -157,7 +157,7 @@ func TestRejects(t *testing.T) {
 		{"모르는 시나리오", with("load", func(in *Input) { in.Scenario = "chaos" }), "모른다"},
 		{"모르는 흐름", with("load", func(in *Input) { in.Flows = []string{"login"} }), "흐름"},
 		{"시험 ID 형식", with("load", func(in *Input) { in.TestID = "Test 1" }), "시험 ID"},
-		{"abort_error_rate 범위", with("load", func(in *Input) { in.AbortErrorRate = 80 }), "abort_error_rate"},
+		{"product_id 칸에 흐름 이름", with("soak", func(in *Input) { in.ProductID = "catalog" }), "흐름 이름이면 flows 칸에 넣는다"},
 		{"duration 형식", with("load", func(in *Input) { in.Duration = "30분" }), "duration"},
 		{"duration 상한", with("load", func(in *Input) { in.Duration = "3h" }), "duration"},
 		{"작업 시간 상한", with("soak", func(in *Input) { in.Duration = "5h59m"; in.Flows = []string{"catalog"} }), "작업 상한"},
@@ -277,7 +277,6 @@ func TestRejectsInvalidInputs(t *testing.T) {
 		{"초 단위가 아닌 duration", with("smoke", func(in *Input) { in.Duration = "1.5s" }), "초 단위"},
 		{"NaN peak_rps", with("load", func(in *Input) { in.PeakRPS = math.NaN() }), "peak_rps"},
 		{"무한대 peak_rps", with("load", func(in *Input) { in.PeakRPS = math.Inf(1) }), "peak_rps"},
-		{"NaN abort_error_rate", with("load", func(in *Input) { in.AbortErrorRate = math.NaN() }), "abort_error_rate"},
 		{"stress의 duration", with("stress", func(in *Input) { in.Duration = "1h" }), "step_duration"},
 		{"smoke의 ramp_up", with("smoke", func(in *Input) { in.RampUp = "5m" }), "ramp_up"},
 		{"먼 open_at", with("spike", func(in *Input) { in.OpenAt = "2026-10-20T06:30:00Z" }), "1h0m0s 안"},
@@ -458,13 +457,15 @@ func TestQueue(t *testing.T) {
 		members      int
 		peak         float64
 		arrival, min int
-		vus, tasks   int
+		vus, tasks   int // vus 는 예상 동시 인원(preAllocatedVUs)이다. maxVUs 는 인원(상한 15,000 안)이다
 	}{
 		// 줄 (500-150)×10 = 3,500명 + 입장 뒤 150×5 = 750명
 		{5000, 0, 10, 39, 4250, 6},
 		{10000, 0, 20, 72, 7750, 9},
-		// 99,980명은 165/초까지다. 줄 약 9,000명
-		{99980, 165, 606, 672, 9830, 8},
+		// 2만 명을 초당 500명: 줄 14,000명 + 750명. 상한 15,000 안이다
+		{20000, 500, 40, 139, 14750, 13},
+		// 99,980명을 165/초: 줄 약 9,000명
+		{99980, 165, 606, 672, 9830, 12},
 		// 입장 속도보다 느리면 줄이 없다. 동시 인원은 인원을 넘지 않는다
 		{100, 50, 2, 7, 100, 1},
 		// 도착 시간은 올림한다. 반올림하면 1초에 2,500명(max_rps 2,000 초과)이 들어간다. 실제 진입은 초당 1,250
@@ -485,7 +486,7 @@ func TestQueue(t *testing.T) {
 		// 도착률을 "도착 시간에 인원만큼"으로 적어 k6의 반복 수가 인원과 같다
 		// 진입은 open_at + 1초에 시작한다(시계 어긋남. 열리기 전에 들어가면 SALE_NOT_OPEN 으로 실패한다)
 		if s.Name != "queue" || s.Flow != "entry" || s.StartTime != "1s" || s.Rate != tc.members || s.TimeUnit != secs(tc.arrival) || s.Duration != secs(tc.arrival) ||
-			s.GracefulStop != secs(deadline-tc.arrival) || s.MaxVUs != tc.vus || s.PreAllocatedVUs != tc.vus {
+			s.GracefulStop != secs(deadline-tc.arrival) || s.PreAllocatedVUs != tc.vus || s.MaxVUs != min(tc.members, 15000) {
 			t.Fatalf("%d명: k6 시나리오 %+v", tc.members, s)
 		}
 		if p.Tasks != tc.tasks || p.MainEnd != 1+deadline || p.Estimates.TotalSeconds != 1+deadline {
@@ -505,8 +506,10 @@ func TestQueueRejects(t *testing.T) {
 		in   Input
 		want string
 	}{
-		// 줄이 7만 명이 된다. 상한 안인 가장 큰 진입 수를 알려 준다
-		{"동시 인원", with(func(in *Input) { in.Members = 99980 }), "99980명이면 peak_rps를 165 이하로 둔다"},
+		// 줄이 2만 명이 넘는다. 상한 안인 가장 큰 진입 수를 알려 준다(비우면 그 값으로 낮춘다)
+		{"동시 인원", with(func(in *Input) { in.Members = 30000; in.PeakRPS = 500 }), "30000명이면 peak_rps를 285 이하로 두거나 비운다"},
+		// duration 을 비웠을 때의 처리 기한은 입력이 아니라 계산한 값이다. 계산을 보여 준다
+		{"계산한 처리 기한", with(func(in *Input) { in.Members = 99980; in.PeakRPS = 60 }), "처리 기한 30m52s(최소 처리 시간 27m52s + 여유 3m0s)가 queue 상한"},
 		{"인원 상한", with(func(in *Input) { in.Members = 99981 }), "1 이상 99980 이하"},
 		{"짧은 기한", with(func(in *Input) { in.Duration = "38s" }), "최소 처리 시간 39s 이상이어야 한다"},
 		{"flows", with(func(in *Input) { in.Flows = []string{"entry"} }), "queue에는 flows를 쓰지 않는다"},
@@ -520,6 +523,33 @@ func TestQueueRejects(t *testing.T) {
 	p := mustPlan(t, c, with(func(in *Input) { in.Duration = "39s" }))
 	if p.Queue.DeadlineSeconds != 39 || p.Scenarios[0].GracefulStop != "29s" {
 		t.Fatalf("기한 %+v", p.Queue)
+	}
+}
+
+// peak_rps 를 비우면 기본 500이고, 동시 인원이 VU 상한을 넘으면 넘지 않는 가장 큰 값으로 낮춘다. 넣은 값은 낮추지 않는다
+func TestQueueAutoPeak(t *testing.T) {
+	c := cfg(t)
+	for _, tc := range []struct {
+		members int
+		peak    float64 // 입력
+		want    float64
+		lowered bool
+	}{
+		{5000, 0, 500, false},
+		{20000, 0, 500, false},
+		{30000, 0, 285, true},
+		{99980, 0, 174, true},
+		{99980, 100, 100, false},
+	} {
+		in := input("queue")
+		in.Members, in.PeakRPS = tc.members, tc.peak
+		p := mustPlan(t, c, in)
+		if q := p.Queue; q.PeakRPS != tc.want || q.PeakLowered != tc.lowered || p.Estimates.MaxVUs > 15000 {
+			t.Fatalf("%d명, 입력 %v: %+v, VU %d", tc.members, tc.peak, q, p.Estimates.MaxVUs)
+		}
+		if tc.lowered && !strings.Contains(p.Markdown(), "초당 "+strconv.Itoa(int(tc.want))+"명(VU 상한에 맞춰 낮췄다)") {
+			t.Fatalf("계획 표에 낮춘 값을 보여야 한다:\n%s", p.Markdown())
+		}
 	}
 }
 

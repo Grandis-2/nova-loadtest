@@ -30,7 +30,6 @@ func main() {
 	flag.StringVar(&in.RampUp, "ramp-up", "", "최대치까지 올리는 시간")
 	flag.IntVar(&in.Members, "members", 0, "queue 에서 진입하는 인원. 0이면 시나리오 기본값")
 	flag.IntVar(&in.Runners, "runners", 0, "k6 태스크 대수. 0이면 계산한다")
-	flag.Float64Var(&in.AbortErrorRate, "abort-error-rate", 0, "중단 기준 오류율(%). 0이면 기본값")
 	flag.StringVar(&flows, "flows", "", "쉼표로 구분한 흐름(비면 모두)")
 	flag.StringVar(&now, "now", "", "지금 시각(시험용, RFC 3339)")
 	flag.StringVar(&jsonOut, "json", "", "계획 JSON을 쓸 파일(비면 표준 출력)")

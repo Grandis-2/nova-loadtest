@@ -457,7 +457,7 @@ func TestQueue(t *testing.T) {
 		members      int
 		peak         float64
 		arrival, min int
-		vus, tasks   int // vus 는 예상 동시 인원(preAllocatedVUs)이다. maxVUs 는 인원(상한 15,000 안)이다
+		vus, tasks   int // vus 는 예상 동시 인원이다. VU 는 인원(상한 15,000 안)만큼 모두 미리 만든다
 	}{
 		// 줄 (500-150)×10 = 3,500명 + 입장 뒤 150×5 = 750명
 		{5000, 0, 10, 39, 4250, 6},
@@ -486,7 +486,7 @@ func TestQueue(t *testing.T) {
 		// 도착률을 "도착 시간에 인원만큼"으로 적어 k6의 반복 수가 인원과 같다
 		// 진입은 open_at + 1초에 시작한다(시계 어긋남. 열리기 전에 들어가면 SALE_NOT_OPEN 으로 실패한다)
 		if s.Name != "queue" || s.Flow != "entry" || s.StartTime != "1s" || s.Rate != tc.members || s.TimeUnit != secs(tc.arrival) || s.Duration != secs(tc.arrival) ||
-			s.GracefulStop != secs(deadline-tc.arrival) || s.PreAllocatedVUs != tc.vus || s.MaxVUs != min(tc.members, 15000) {
+			s.GracefulStop != secs(deadline-tc.arrival) || s.PreAllocatedVUs != s.MaxVUs || s.MaxVUs != max(tc.vus, min(tc.members, 15000)) {
 			t.Fatalf("%d명: k6 시나리오 %+v", tc.members, s)
 		}
 		if p.Tasks != tc.tasks || p.MainEnd != 1+deadline || p.Estimates.TotalSeconds != 1+deadline {

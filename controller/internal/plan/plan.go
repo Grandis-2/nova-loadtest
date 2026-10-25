@@ -628,10 +628,11 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 			})
 			// 예상 동시 인원은 입장이 초당 150명으로 이어질 때다. 입장이 늦어지면 회원이 줄에 더 남으므로 VU 는 인원
 			// 전체(상한 안)까지 늘 수 있게 둔다. 모자라면 k6 가 회원을 들여보내지 못한다(운영에서 입장이 초당 약 1명일 때
-			// 7,750개로 잡은 VU 가 모자라 2,124명이 시작하지 못했다)
+			// 7,750개로 잡은 VU 가 모자라 2,124명이 시작하지 못했다).
+			// VU 는 모두 미리 만든다. 회원 한 명이 반복 한 번이라 인원보다 많이 쓰지 않는다. 시험 중에 VU 를 늘리면 만드는
+			// 동안 도착한 회원을 k6 가 버린다(4,250개를 미리 만들고 5,000개까지 늘리게 두었더니 매번 217~353명을 버렸다)
 			q := &scenarios[len(scenarios)-1]
-			setVUs(q, inFlight, 1)
-			q.MaxVUs = max(q.PreAllocatedVUs, min(members, sc.MaxVUs))
+			setVUs(q, math.Max(inFlight, math.Min(n, float64(sc.MaxVUs))), 1)
 			windows = append(windows, Window{"queue", ms, ms + 1 + minS})
 		}
 	}

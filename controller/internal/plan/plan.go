@@ -284,8 +284,9 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 	if in.AdmissionRPS != 0 {
 		if !queue {
 			fail("%s에는 admission_rps를 쓰지 않는다(입장 속도를 받는 시나리오는 queue뿐이다)", in.Scenario)
-		} else if !(in.AdmissionRPS > 0) || math.IsInf(in.AdmissionRPS, 0) {
-			fail("admission_rps %v는 0보다 커야 한다", in.AdmissionRPS)
+		} else if !(in.AdmissionRPS >= 1) || math.IsInf(in.AdmissionRPS, 0) || in.AdmissionRPS != math.Trunc(in.AdmissionRPS) {
+			// waitingroom 의 전역 입장 속도는 초당 정수다. 1 미만을 받으면 최소 처리 시간이 int 범위를 넘어 음수가 된다
+			fail("admission_rps %v는 1 이상의 정수여야 한다(대기열 관리의 전역 입장 속도와 같은 값)", in.AdmissionRPS)
 		} else {
 			c := *cfg
 			c.AdmissionRPS = in.AdmissionRPS

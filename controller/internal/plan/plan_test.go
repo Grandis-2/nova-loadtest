@@ -538,7 +538,7 @@ func TestQueueAdmissionRPS(t *testing.T) {
 	}{
 		{0, 39, 4250, "입장 초당 150명, 최소 처리 39s, 처리 기한 3m39s"},
 		{20, 255, 4900, "입장 초당 20명, 최소 처리 4m15s, 처리 기한 7m15s"},
-		{12.5, 405, 4938, "입장 초당 12.5명, 최소 처리 6m45s, 처리 기한 9m45s"},
+		{7, 720, 4965, "입장 초당 7명, 최소 처리 12m0s, 처리 기한 15m0s"},
 	} {
 		in := input("queue")
 		in.AdmissionRPS = tc.admission
@@ -574,8 +574,12 @@ func TestQueueAdmissionRPS(t *testing.T) {
 		want string
 	}{
 		{"다른 시나리오", with("load", func(in *Input) { in.AdmissionRPS = 20 }), "load에는 admission_rps를 쓰지 않는다"},
-		{"음수", with("queue", func(in *Input) { in.AdmissionRPS = -1 }), "admission_rps -1는 0보다 커야 한다"},
-		{"무한", with("queue", func(in *Input) { in.AdmissionRPS = math.Inf(1) }), "0보다 커야 한다"},
+		{"음수", with("queue", func(in *Input) { in.AdmissionRPS = -1 }), "admission_rps -1는 1 이상의 정수여야 한다"},
+		// 1 미만이면 최소 처리 시간이 int 범위를 넘는다(1e-16 이면 "최소 처리 -1s" 계획이 나왔다)
+		{"1 미만", with("queue", func(in *Input) { in.AdmissionRPS = 1e-16 }), "1 이상의 정수여야 한다"},
+		{"소수", with("queue", func(in *Input) { in.AdmissionRPS = 12.5 }), "admission_rps 12.5는 1 이상의 정수여야 한다"},
+		{"무한", with("queue", func(in *Input) { in.AdmissionRPS = math.Inf(1) }), "1 이상의 정수여야 한다"},
+		{"NaN", with("queue", func(in *Input) { in.AdmissionRPS = math.NaN() }), "1 이상의 정수여야 한다"},
 		// 기한을 직접 넣었으면 넣은 입장 속도의 최소 처리 시간과 비교한다
 		{"짧은 기한", with("queue", func(in *Input) { in.AdmissionRPS = 20; in.Duration = "4m" }), "최소 처리 시간 4m15s 이상이어야 한다(5000명을 입장 속도 20/초로"},
 	} {

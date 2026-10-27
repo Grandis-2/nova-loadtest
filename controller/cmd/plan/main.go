@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&in.Duration, "duration", "", "최대치를 유지하는 시간")
 	flag.StringVar(&in.RampUp, "ramp-up", "", "최대치까지 올리는 시간")
 	flag.IntVar(&in.Members, "members", 0, "queue 에서 진입하는 인원. 0이면 시나리오 기본값")
+	flag.Float64Var(&in.AdmissionRPS, "admission-rps", 0, "queue 에서 대기열 관리에 설정한 전역 입장 속도(초당). 0이면 scenarios.yml 값")
 	flag.IntVar(&in.Runners, "runners", 0, "k6 태스크 대수. 0이면 계산한다")
 	flag.StringVar(&flows, "flows", "", "쉼표로 구분한 흐름(비면 모두)")
 	flag.StringVar(&now, "now", "", "지금 시각(시험용, RFC 3339)")

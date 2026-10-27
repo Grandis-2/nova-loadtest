@@ -43,8 +43,8 @@ func (p *Plan) Markdown() string {
 		if q.PeakLowered {
 			peak += "(VU 상한에 맞춰 낮췄다)"
 		}
-		row("queue 인원", fmt.Sprintf("%d명, 진입 %s × %s, 최소 처리 %s, 처리 기한 %s", q.Members, peak, hms(q.ArrivalSeconds),
-			hms(q.MinSeconds), hms(q.DeadlineSeconds)))
+		row("queue 인원", fmt.Sprintf("%d명, 진입 %s × %s, 입장 초당 %g명, 최소 처리 %s, 처리 기한 %s", q.Members, peak,
+			hms(q.ArrivalSeconds), q.AdmissionRPS, hms(q.MinSeconds), hms(q.DeadlineSeconds)))
 	}
 	row("본 시험", fmt.Sprintf("%s ~ %s (START_AT 기준)", hms(p.MainStart), hms(p.MainEnd)))
 	row("예상 시간", hms(p.Estimates.TotalSeconds))

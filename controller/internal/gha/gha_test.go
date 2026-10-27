@@ -91,9 +91,9 @@ func TestTestID(t *testing.T) {
 func TestInputs(t *testing.T) {
 	in, err := Inputs(envOf(map[string]string{
 		"TEST_ID": "lt-20261020t0630-1", "LT_SCENARIO": "load", "LT_PRODUCT_ID": " p ", "LT_PEAK_RPS": "300",
-		"LT_RUNNERS": "", "LT_FLOWS": "catalog, entry,", "LT_MEMBERS": " 10000 ", "PLANNED_AT": "2026-10-20T06:30:00Z",
+		"LT_RUNNERS": "", "LT_FLOWS": "catalog, entry,", "LT_MEMBERS": " 10000 ", "LT_ADMISSION_RPS": " 20 ", "PLANNED_AT": "2026-10-20T06:30:00Z",
 	}))
-	if err != nil || in.ProductID != "p" || in.PeakRPS != 300 || len(in.Flows) != 2 || in.Members != 10000 || in.Now.IsZero() {
+	if err != nil || in.ProductID != "p" || in.PeakRPS != 300 || len(in.Flows) != 2 || in.Members != 10000 || in.AdmissionRPS != 20 || in.Now.IsZero() {
 		t.Fatalf("%+v %v", in, err)
 	}
 	if _, err := Inputs(envOf(map[string]string{"LT_PEAK_RPS": "많이"})); err == nil {
@@ -104,6 +104,9 @@ func TestInputs(t *testing.T) {
 	}
 	if _, err := Inputs(envOf(map[string]string{"LT_MEMBERS": "5,000"})); err == nil {
 		t.Fatal("인원이 정수가 아니면 실패해야 한다")
+	}
+	if _, err := Inputs(envOf(map[string]string{"LT_ADMISSION_RPS": "20/s"})); err == nil {
+		t.Fatal("입장 속도가 숫자가 아니면 실패해야 한다")
 	}
 }
 

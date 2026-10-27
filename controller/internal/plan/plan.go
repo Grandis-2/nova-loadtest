@@ -36,9 +36,10 @@ type Input struct {
 	Duration      string    `json:"duration,omitempty"`
 	RampUp        string    `json:"ramp_up,omitempty"`
 	Runners       int       `json:"runners,omitempty"`
-	Flows         []string  `json:"flows,omitempty"`     // 비면 다섯 흐름 모두
-	Members       int       `json:"members,omitempty"`   // queue: 진입하는 인원
-	Now           time.Time `json:"planned_at,omitzero"` // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
+	Flows         []string  `json:"flows,omitempty"`         // 비면 다섯 흐름 모두
+	Members       int       `json:"members,omitempty"`       // queue: 진입하는 인원
+	AdmissionRPS  float64   `json:"admission_rps,omitempty"` // queue: 대기열 관리에 설정한 전역 입장 속도(초당). 비면 scenarios.yml 값
+	Now           time.Time `json:"planned_at,omitzero"`     // 러너가 계획한 시각. open_at이 너무 가까운지 볼 때만 쓴다
 }
 
 // Range는 회원 번호 범위 [Start, Start+Count)이다.
@@ -153,6 +154,7 @@ type Queue struct {
 	PeakRPS         float64 `json:"peak_rps"`               // 초당 진입 수(입력, 비우면 기본값이나 낮춘 값)
 	PeakLowered     bool    `json:"peak_lowered,omitempty"` // peak_rps 를 비워서 동시 인원이 VU 상한 안에 들게 낮췄다
 	ArrivalSeconds  int     `json:"arrival_seconds"`        // 모두 진입하는 시간
+	AdmissionRPS    float64 `json:"admission_rps"`          // 최소 처리 시간을 계산한 입장 속도(초당). 입력이 없으면 scenarios.yml 값
 	MinSeconds      int     `json:"min_seconds"`            // 입장 속도로 모두 들여보내고 접수까지 가는 최소 시간
 	DeadlineSeconds int     `json:"deadline_seconds"`       // 처리 기한(duration). k6는 이때 남은 회원을 끊는다
 }
@@ -275,6 +277,20 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		}
 		if members < 1 || members > sc.MaxMembers {
 			fail("members %d는 1 이상 %d 이하여야 한다", members, sc.MaxMembers)
+		}
+	}
+	// 입장 속도는 운영자가 대기열 관리에서 바꾼다. 실제보다 빠르게 잡으면 최소 처리 시간과 처리 기한이 짧아져 줄에 선 회원이
+	// 기한에 끊긴다(2026-10-26 입장 초당 20명에서 5,000명을 돌렸을 때 기한이 150명 기준 3m39s 로 잡혀 842명이 결과 없이 끝났다)
+	if in.AdmissionRPS != 0 {
+		if !queue {
+			fail("%s에는 admission_rps를 쓰지 않는다(입장 속도를 받는 시나리오는 queue뿐이다)", in.Scenario)
+		} else if !(in.AdmissionRPS >= 1) || math.IsInf(in.AdmissionRPS, 0) || in.AdmissionRPS != math.Trunc(in.AdmissionRPS) {
+			// waitingroom 의 전역 입장 속도는 초당 정수다. 1 미만을 받으면 최소 처리 시간이 int 범위를 넘어 음수가 된다
+			fail("admission_rps %v는 1 이상의 정수여야 한다(대기열 관리의 전역 입장 속도와 같은 값)", in.AdmissionRPS)
+		} else {
+			c := *cfg
+			c.AdmissionRPS = in.AdmissionRPS
+			cfg = &c
 		}
 	}
 
@@ -610,7 +626,8 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 		}
 		dur = time.Duration(deadline) * time.Second
 		mainLen = 1 + deadline // 진입은 본 시험 시작(open_at) + 1초에 시작한다(spike, rush와 같다. 시계 어긋남)
-		p.Queue = &Queue{Members: members, PeakRPS: peak, PeakLowered: lowered, ArrivalSeconds: arrivalS, MinSeconds: minS, DeadlineSeconds: deadline}
+		p.Queue = &Queue{Members: members, PeakRPS: peak, PeakLowered: lowered, ArrivalSeconds: arrivalS, AdmissionRPS: cfg.AdmissionRPS,
+			MinSeconds: minS, DeadlineSeconds: deadline}
 		if math.Ceil(inFlight) > float64(sc.MaxVUs) && limited && maxPeak >= 1 {
 			vuHint = fmt.Sprintf(". 대기열은 초당 %.0f명만 입장시키므로 나머지는 줄에 서서 VU를 하나씩 잡는다. "+
 				"%d명이면 peak_rps를 %.0f 이하로 두거나 비운다", cfg.AdmissionRPS, members, maxPeak)
@@ -626,7 +643,7 @@ func New(cfg *config.Config, in Input) (*Plan, error) {
 				// 줄에 선 회원은 처리 기한까지 기다린다
 				GracefulStop: secs(deadline - arrivalS),
 			})
-			// 예상 동시 인원은 입장이 초당 150명으로 이어질 때다. 입장이 늦어지면 회원이 줄에 더 남으므로 VU 는 인원
+			// 예상 동시 인원은 입장이 입장 속도(admission_rps)로 이어질 때다. 입장이 늦어지면 회원이 줄에 더 남으므로 VU 는 인원
 			// 전체(상한 안)까지 늘 수 있게 둔다. 모자라면 k6 가 회원을 들여보내지 못한다(운영에서 입장이 초당 약 1명일 때
 			// 7,750개로 잡은 VU 가 모자라 2,124명이 시작하지 못했다).
 			// VU 는 모두 미리 만든다. 회원 한 명이 반복 한 번이라 인원보다 많이 쓰지 않는다. 시험 중에 VU 를 늘리면 만드는
